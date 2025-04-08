@@ -13,8 +13,9 @@
 #include <string.h>
 #include <stdlib.h>
 #include <math.h>
+#include <ctype.h>
 
-#define VERSION_STR "v0.2 2025-04-06 MCP3301 ADC via PIO"
+#define VERSION_STR "v0.2 2025-04-06 Pico2 with MCP3301 ADC via PIO"
 
 const uint READY_PIN = 22;
 const uint LED_PIN = PICO_DEFAULT_LED_PIN;
@@ -28,8 +29,9 @@ int getstr(char* buf, int nbuf)
 // Read (without echo) a line of characters into the buffer,
 // stopping when we see a new-line character.
 // Returns the number of characters collected,
-// excluding the terminating null char.
+// excluding the terminating null character.
 {
+	memset(buf, '\0', nbuf);
     int i = 0;
     char c;
     uint8_t done = 0;
@@ -52,6 +54,37 @@ int getstr(char* buf, int nbuf)
     return i;
 } // end getstr()
 
+int trim_string(char *str)
+// Trim space characters from the start and end of the string.
+// We assume that the string is properly null terminated.
+// Returns the number of characters in the trimmed string, excluding the terminating '\0'.
+{
+	int len = strlen(str);
+	if (len == 0) return 0;
+	int start = 0;
+	while (isspace((unsigned char)str[start])) {
+		start += 1;
+	}
+	if (start == len) {
+	    // There are no non-space characters left.
+		str[0] = '\0';
+		return 0;
+	}
+	// At this point, we have at least one non-space character.
+	if (start > 0) {
+		// Move all remaining characters.
+		memmove(str, str+start, len-start);
+		len -= start;
+	}
+	str[len] = '\0';
+	int last = len - 1;
+	while ((last >= 0) && isspace((unsigned char)str[last])) {
+		str[last] = '\0';
+		last -= 1;
+	}
+	return last+1; // final string length
+}
+
 void interpret_command(char* cmdStr)
 // A command that does not do what is expected should return a message
 // that includes the word "error".
@@ -59,7 +92,7 @@ void interpret_command(char* cmdStr)
     char* token_ptr;
     const char* sep_tok = ", ";
     uint8_t i;
-    // printf("DEBUG: cmdStr=%s", cmdStr);
+    // printf("DEBUG: DAQ MCU cmdStr=\"%s\"", cmdStr);
     if (!override_led) gpio_put(LED_PIN, 1); // To indicate start of interpreter activity.
     switch (cmdStr[0]) {
 	case 'v':
@@ -114,12 +147,16 @@ int main()
         // Backspace deleting is allowed.
         // NL (Ctrl-J) signals end of incoming string.
         int m = getstr(bufA, NBUFA);
+		m = trim_string(bufA);
         // Note that the cmd string may be of zero length,
         // with the null character in the first place.
-        // If that is the case, do nothing with it.
+        // If that is the case, do nothing with it 
+		// but just reply with a newline character.
         if (m > 0) {
             interpret_command(bufA);
-        }
+        } else {
+			printf("error: empty command\n");
+		}
     }
     return 0;
 }
