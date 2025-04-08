@@ -1,13 +1,21 @@
 // mcp3301_pio.c
+//
+// RP2350 Pico2 board as the DAQ-MCU.
+//
 // PIO example code (to be) mostly copied from here
 // https://github.com/raspberrypi/pico-examples/pio/spi/
+// Presently, we have only the first MCP3301 chip being
+// connected to the SPI0 peripheral module.
 //
 // PJ 2025-04-06: simple interpreter without any pio interaction
+//    2025-04-09: data being collected from MCP3301 chip 0 via SPI0. 
 //
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
 #include "hardware/uart.h"
+#include "hardware/timer.h"
+#include "hardware/spi.h"
 #include "pico/binary_info.h"
 #include <stdio.h>
 #include <string.h>
@@ -15,12 +23,15 @@
 #include <math.h>
 #include <ctype.h>
 
-#define VERSION_STR "v0.3 2025-04-07 Pico2 with MCP3301 ADC"
+#define VERSION_STR "v0.4 2025-04-09 Pico2 as DAQ MCU"
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
 const uint Pico2_EVENT_PIN = 3;
 const uint SYSTEM_EVENTn_PIN = 2;
+const uint SPI0_RX_PIN = 4;
+const uint SPI0_CSn_PIN = 5;
+const uint SPI0_CLK_PIN = 6;
 
 static inline void assert_ready()
 {
@@ -65,10 +76,10 @@ static inline void sampling_LED_OFF()
 int16_t res[MAXNCHAN];
 
 // A place to collect the full record.
-#define NWORDS 0x00020000
-int16_t data[NWORDS];
-uint32_t next_word_index_in_data;
-uint8_t word_index_has_wrapped_around;
+#define N_HALFWORDS 0x00020000
+int16_t data[N_HALFWORDS];
+uint32_t next_halfword_index_in_data;
+uint8_t halfword_index_has_wrapped_around;
 
 uint8_t event_n;
 uint8_t did_not_keep_up_during_sampling;
@@ -79,8 +90,8 @@ int16_t vregister[NUMREG]; // working copy in SRAM
 
 void set_registers_to_original_values()
 {
-    vregister[0] = 1250; // sample period in timer ticks
-    vregister[1] = 4;    // number of channels to sample 1, 2 or 4; (3 does not wrap neatly)
+    vregister[0] = 100;  // sample period in microseconds (timer ticks)
+    vregister[1] = 4;    // number of channels to sample 1, 2 or 4; (3 does not fit neatly)
     vregister[2] = 128;  // number of samples in record after trigger event
     vregister[3] = 0;    // trigger mode 0=immediate, 1=internal, 2=external
     vregister[4] = 0;    // trigger channel for internal trigger
@@ -91,12 +102,12 @@ void set_registers_to_original_values()
 uint32_t max_n_samples(void)
 {
     uint8_t n_chan = (uint8_t)vregister[1];
-    return NWORDS / n_chan;
+    return N_HALFWORDS / n_chan;
 }
 
-uint32_t oldest_word_index_in_data()
+uint32_t oldest_halfword_index_in_data()
 {
-    return (word_index_has_wrapped_around) ? next_word_index_in_data : 0;
+    return (halfword_index_has_wrapped_around) ? next_halfword_index_in_data : 0;
 }
 
 void sample_channels(void)
@@ -116,7 +127,7 @@ void sample_channels(void)
 //
 {
     // Get configuration data from virtual registers.
-    uint16_t ticks = (uint16_t)vregister[0];
+    uint16_t period_us = (uint16_t)vregister[0];
     uint8_t n_chan = (uint8_t)vregister[1];
     uint8_t mode = (uint8_t)vregister[3];
 # define TRIGGER_IMMEDIATE 0
@@ -127,32 +138,36 @@ void sample_channels(void)
     uint8_t trigger_slope = (uint8_t)vregister[6];
     //
     release_event();
-    // FIX-ME adc0_init();
-    next_word_index_in_data = 0; // Start afresh, at index 0.
-    word_index_has_wrapped_around = 0;
+    next_halfword_index_in_data = 0; // Start afresh, at index 0.
+    halfword_index_has_wrapped_around = 0;
     uint8_t post_event = 0;
     uint16_t samples_remaining = (uint16_t)vregister[2];
     did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
-    // FIX-ME timerA0_init(ticks); // period=ticks*0.8us
-    // FIX-ME timerA0_wait();
+    uint64_t timeout = time_us_64() + period_us;
+    //
+    uint16_t spi_buf[4]; // Somewhere to put the SPI incoming data.
     //
     while (samples_remaining > 0) {
         sampling_LED_ON();
-        // Following flag will be set to 0 if we finish sampling before timer overflows.
-        uint8_t late_flag = 1;
         // FIX-ME Take the analog sample set.
-        for (uint8_t ch=0; ch < n_chan; ch++) {
-            res[ch] = (int16_t)0; // 16-bit value only
+        // Presently, we read only MCP3301 chip 0.
+        spi_read16_blocking(spi0, 0, spi_buf, 1);
+        uint16_t value = spi_buf[0];
+        // We need to sign-extend the 13-bit number.
+        if (value & 0x1000) { value |= 0xe000; }
+        res[0] = (int16_t)value;
+        for (uint8_t ch=1; ch < n_chan; ch++) {
+            res[ch] = (int16_t)0;
         }
         // Save the sample for later.
         for (uint8_t ch=0; ch < n_chan; ch++) {
-            data[next_word_index_in_data+ch] = res[ch];
+            data[next_halfword_index_in_data+ch] = res[ch];
         }
-        // Point to the next available SRAM address.
-        next_word_index_in_data += n_chan;
-        if (next_word_index_in_data >= NWORDS) {
-            next_word_index_in_data -= NWORDS;
-            word_index_has_wrapped_around = 1;
+        // Point to the next available halfword index.
+        next_halfword_index_in_data += n_chan;
+        if (next_halfword_index_in_data >= N_HALFWORDS) {
+            next_halfword_index_in_data -= N_HALFWORDS;
+            halfword_index_has_wrapped_around = 1;
         }
         sampling_LED_OFF();
         //
@@ -180,21 +195,15 @@ void sample_channels(void)
                 }
             } // end switch
         }
-        // Wait for timer overflow.
-/*
-        while (!(TCA0.SINGLE.INTFLAGS & TCA_SINGLE_OVF_bm)) {
-            // __builtin_avr_wdr();
-            // We have arrived before the timer overflowed for this sample period.
-            late_flag = 0;
-        }
-        // We reset the interrupt flag for the timer but leave the timer ticking
-        // so that we have accurate periods.
-*/
+        bool late_flag = time_reached(timeout);
         // If we arrive late for the timer, for even one sample set, set the global flag.
-        if (late_flag) did_not_keep_up_during_sampling = 1;
+        if (late_flag) {
+			did_not_keep_up_during_sampling = 1;
+		} else {
+			busy_wait_until(timeout);
+		}
+		timeout += period_us;
     } // end while
-    // FIX-ME timerA0_close();
-    // FIX-ME adc0_close();
 } // end void sample_channels()
 
 void sample_channels_once()
@@ -225,10 +234,10 @@ char* sample_set_to_str(uint32_t n)
 {
     uint8_t n_chan = (uint8_t)vregister[1];
     // Start with index of oldest sample, then move to selected sample.
-    uint32_t index = oldest_word_index_in_data();
+    uint32_t index = oldest_halfword_index_in_data();
     index += n_chan * n;
-    // Assume that the word sets in the data wrap neatly.
-	if (index > NWORDS) { index -= NWORDS; }
+    // Assume that the halfword sets in the data wrap neatly.
+	if (index > N_HALFWORDS) { index -= N_HALFWORDS; }
 	for (uint8_t ch=0; ch < n_chan; ch++) { res[ch] = data[index+ch]; }
     snprintf(str_buf1, NSTRBUF1, "%d", res[0]);
     for (uint8_t ch=1; ch < n_chan; ch++) {
@@ -442,6 +451,9 @@ int main()
     bi_decl(bi_1pin_with_name(READY_PIN, "Ready/Busy# output pin"));
     bi_decl(bi_1pin_with_name(Pico2_EVENT_PIN, "Pico2 EVENT output pin"));
     bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "Sense EVENT input pin"));
+    bi_decl(bi_1pin_with_name(SPI0_RX_PIN, "SPI0 data input pin"));
+    bi_decl(bi_1pin_with_name(SPI0_CSn_PIN, "SPI0 chip select pin"));
+    bi_decl(bi_1pin_with_name(SPI0_CLK_PIN, "SPI0 clock output pin"));
 	//
 	// Flash LED twice at start up.
 	//
@@ -451,6 +463,16 @@ int main()
 	sampling_LED_OFF(); sleep_ms(500);
 	sampling_LED_ON(); sleep_ms(500);
 	sampling_LED_OFF();
+	//
+	// Temporarily, we will use SPI0 to talk to MCP3301 chip 0.
+	// Eventually, we will move to using the PIO to talk to all 4
+	// of the MCP3301 chips together.
+	//
+	spi_init(spi0, 1700000);
+	gpio_set_function(SPI0_CLK_PIN, GPIO_FUNC_SPI);
+	gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
+	gpio_set_function(SPI0_RX_PIN, GPIO_FUNC_SPI);
+	spi_set_format(spi0, 16, SPI_CPHA_0, SPI_CPOL_0, SPI_MSB_FIRST);
 	//
 	// We output an event pin that gets buffered by the COMMS MCU
 	// and reflected onto the system event line.

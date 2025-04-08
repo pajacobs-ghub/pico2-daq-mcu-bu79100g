@@ -25,7 +25,12 @@ add_executable(mcp3301_pio
         )
 
 # pull in common dependencies
-target_link_libraries(mcp3301_pio pico_stdlib hardware_pio)
+target_link_libraries(mcp3301_pio 
+	pico_stdlib 
+	hardware_pio
+	hardware_timer
+	hardware_spi
+	)
 
 # enable uart0
 pico_enable_stdio_uart(mcp3301_pio 1)
