@@ -23,7 +23,7 @@
 #include <math.h>
 #include <ctype.h>
 
-#define VERSION_STR "v0.4 2025-04-09 Pico2 as DAQ MCU"
+#define VERSION_STR "v0.5 2025-04-12 Pico2 as DAQ MCU"
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
@@ -153,6 +153,8 @@ void sample_channels(void)
         // Presently, we read only MCP3301 chip 0.
         spi_read16_blocking(spi0, 0, spi_buf, 1);
         uint16_t value = spi_buf[0];
+        // The first couple of bits are not driven, only 13 should be kept.
+        value &= 0x1fff;
         // We need to sign-extend the 13-bit number.
         if (value & 0x1000) { value |= 0xe000; }
         res[0] = (int16_t)value;
@@ -443,6 +445,10 @@ int main()
 {
     stdio_init_all();
 	uart_set_baudrate(uart0, 230400);
+	// Attempt to discard any characters sitting the UART already.
+	while (uart_is_readable_within_us(uart0, 100)) {
+		__unused char junkc = uart_getc(uart0);
+	}
 	//
     // Some information for picotool.
 	//
