@@ -41,7 +41,7 @@ public entry_point:
 % c-sdk {
 static inline void mcp3301_read_program_init(PIO pio, uint sm, uint offset)
 {
-	pio_gpio_init(pio, 4); // RX-DO0 (from MCP3301 0)
+	// pio_gpio_init(pio, 4); // RX-DO0 (from MCP3301 0)
 	pio_gpio_init(pio, 5); // CSn
 	pio_gpio_init(pio, 6); // CLK
 	pio_sm_set_consecutive_pindirs(pio, sm, 4, 1, false); // RX input
