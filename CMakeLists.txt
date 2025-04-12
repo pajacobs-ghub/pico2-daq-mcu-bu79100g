@@ -20,12 +20,14 @@ add_compile_options(-Wall
         -Wno-format # int != int32_t because gcc has int32_t as long int
         )
 
-add_executable(mcp3301_pio
-        mcp3301_pio.c
-        )
+add_executable(mcp3301_pio)
+
+pico_generate_pio_header(mcp3301_pio ${CMAKE_CURRENT_LIST_DIR}/mcp3301.pio)
+
+target_sources(mcp3301_pio PRIVATE mcp3301_pio.c)
 
 # pull in common dependencies
-target_link_libraries(mcp3301_pio 
+target_link_libraries(mcp3301_pio PRIVATE
 	pico_stdlib 
 	hardware_pio
 	hardware_timer

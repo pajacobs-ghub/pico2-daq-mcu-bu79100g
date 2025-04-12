@@ -22,16 +22,26 @@
 #include <stdlib.h>
 #include <math.h>
 #include <ctype.h>
+#include "mcp3301.pio.h"
 
 #define VERSION_STR "v0.5 2025-04-12 Pico2 as DAQ MCU"
+
+#define USE_SPI 1
+// Alternative is to use PIO
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
 const uint Pico2_EVENT_PIN = 3;
 const uint SYSTEM_EVENTn_PIN = 2;
+#if USE_SPI
 const uint SPI0_RX_PIN = 4;
 const uint SPI0_CSn_PIN = 5;
 const uint SPI0_CLK_PIN = 6;
+#else
+const uint PIO_RX_PIN = 4;
+const uint PIO_CSn_PIN = 5;
+const uint PIO_CLK_PIN = 6;
+#endif
 
 static inline void assert_ready()
 {
@@ -145,14 +155,22 @@ void sample_channels(void)
     did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
     uint64_t timeout = time_us_64() + period_us;
     //
-    uint16_t spi_buf[4]; // Somewhere to put the SPI incoming data.
     //
     while (samples_remaining > 0) {
         sampling_LED_ON();
-        // FIX-ME Take the analog sample set.
-        // Presently, we read only MCP3301 chip 0.
-        spi_read16_blocking(spi0, 0, spi_buf, 1);
-        uint16_t value = spi_buf[0];
+        // Take the analog sample set.
+        // FIX-ME  Presently, we read only MCP3301 chip 0.
+		uint16_t value = 0;
+#		if USE_SPI
+		uint16_t adc_buf[4]; // Somewhere to put the incoming SPI data.
+        spi_read16_blocking(spi0, 0, adc_buf, 1);
+        value = adc_buf[0];
+#		else
+		// PIO flavour
+		pio_sm_put_blocking(pio0, 0, 1);
+		uint32_t pio_data = pio_sm_get_blocking(pio0, 0);
+		value = (uint16_t)pio_data;
+#       endif
         // The first couple of bits are not driven, only 13 should be kept.
         value &= 0x1fff;
         // We need to sign-extend the 13-bit number.
@@ -457,9 +475,15 @@ int main()
     bi_decl(bi_1pin_with_name(READY_PIN, "Ready/Busy# output pin"));
     bi_decl(bi_1pin_with_name(Pico2_EVENT_PIN, "Pico2 EVENT output pin"));
     bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "Sense EVENT input pin"));
-    bi_decl(bi_1pin_with_name(SPI0_RX_PIN, "SPI0 data input pin"));
-    bi_decl(bi_1pin_with_name(SPI0_CSn_PIN, "SPI0 chip select pin"));
-    bi_decl(bi_1pin_with_name(SPI0_CLK_PIN, "SPI0 clock output pin"));
+#	if USE_SPI
+	bi_decl(bi_1pin_with_name(SPI0_RX_PIN, "SPI0 data input pin"));
+	bi_decl(bi_1pin_with_name(SPI0_CSn_PIN, "SPI0 chip select pin"));
+	bi_decl(bi_1pin_with_name(SPI0_CLK_PIN, "SPI0 clock output pin"));
+#   else
+    bi_decl(bi_1pin_with_name(PIO_RX_PIN, "PIO0 data input pin"));
+    bi_decl(bi_1pin_with_name(PIO_CSn_PIN, "PIO0 chip select pin"));
+    bi_decl(bi_1pin_with_name(PIO_CLK_PIN, "PIO0 clock output pin"));
+#   endif
 	//
 	// Flash LED twice at start up.
 	//
@@ -470,15 +494,21 @@ int main()
 	sampling_LED_ON(); sleep_ms(500);
 	sampling_LED_OFF();
 	//
-	// Temporarily, we will use SPI0 to talk to MCP3301 chip 0.
 	// Eventually, we will move to using the PIO to talk to all 4
 	// of the MCP3301 chips together.
 	//
+#	if USE_SPI
+	// Temporarily, we will use SPI0 to talk to MCP3301 chip 0.
 	spi_init(spi0, 1700000);
 	gpio_set_function(SPI0_CLK_PIN, GPIO_FUNC_SPI);
 	gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
 	gpio_set_function(SPI0_RX_PIN, GPIO_FUNC_SPI);
 	spi_set_format(spi0, 16, SPI_CPHA_0, SPI_CPOL_0, SPI_MSB_FIRST);
+#   else
+	// PIO flavour
+	uint offset = pio_add_program(pio0, &mcp3301_read_program);
+	mcp3301_read_program_init(pio0, 0, offset);
+#   endif
 	//
 	// We output an event pin that gets buffered by the COMMS MCU
 	// and reflected onto the system event line.

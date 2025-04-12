@@ -1,0 +1,56 @@
+; mcp3301.pio
+; Collect data from a single MCP3301 chip.
+;
+; Hints taken from the C/C++ SDK and
+; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
+; 
+; Peter J. 2025-04-12 First cut 
+;
+; Pin assignments
+; RX (GPIO4) is IN pin 0
+; CSn (GPIO5) is side-set pin 0
+; CLK (GPIO6) is side-set pin 1
+
+.program mcp3301_read
+.pio_version RP2350
+.fifo txrx
+; sysclk at 125MHz (8ns period)
+; Want the PIO instruction cycle to be 288ns
+.clock_div 36.0
+.in 1
+.side_set 2
+.out 0
+
+bitloop:
+	nop             side 0x0 [1]  ; CLK low
+	in pins, 1      side 0x2      ; read RX pin, set CLK high
+	jmp x-- bitloop side 0x2      ; CLK stays high as we go for the next bit.
+	
+	; If we fall-through to here, all bits are now shifted in
+	; so we push them into the RX FIFO.
+	push            side 0x0      ; take CLK low
+	nop             side 0x0 [1]  ; keep CSn low a while longer
+	
+public entry_point:
+    ; We block here until the CPU writes a word to the TX FIFO.
+    ; We don't actually use that word.
+	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
+	set x, 16       side 0x0      ; take CSn low, keep CLK low
+.wrap
+
+% c-sdk {
+static inline void mcp3301_read_program_init(PIO pio, uint sm, uint offset)
+{
+	pio_gpio_init(pio, 4); // RX-DO0 (from MCP3301 0)
+	pio_gpio_init(pio, 5); // CSn
+	pio_gpio_init(pio, 6); // CLK
+	pio_sm_set_consecutive_pindirs(pio, sm, 4, 1, false); // RX input
+	pio_sm_set_consecutive_pindirs(pio, sm, 5, 2, true); // CSn, CLK output
+	
+	pio_sm_config c = mcp3301_read_program_get_default_config(offset);
+	sm_config_set_sideset_pins(&c, 5);
+	sm_config_set_in_pins(&c, 4);
+	
+	pio_sm_init(pio, sm, offset, &c);
+}
+%}
