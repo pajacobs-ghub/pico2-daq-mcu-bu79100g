@@ -1,14 +1,10 @@
 // mcp3301_pio.c
 //
-// RP2350 Pico2 board as the DAQ-MCU.
-//
-// PIO example code (to be) mostly copied from here
-// https://github.com/raspberrypi/pico-examples/pio/spi/
-// Presently, we have only the first MCP3301 chip being
-// connected to the SPI0 peripheral module.
+// RP2350 Pico2 board as the DAQ-MCU, getting data from a single MCP3301.
 //
 // PJ 2025-04-06: simple interpreter without any pio interaction
-//    2025-04-09: data being collected from MCP3301 chip 0 via SPI0. 
+//    2025-04-09: data being collected from MCP3301 chip 0 via SPI0.
+//    2025-04-13: have the PIO working to collect MCP3301 0 data.
 //
 #include "pico/stdlib.h"
 #include "hardware/gpio.h"
@@ -24,10 +20,10 @@
 #include <ctype.h>
 #include "mcp3301.pio.h"
 
-#define VERSION_STR "v0.5 2025-04-12 Pico2 as DAQ MCU"
+#define VERSION_STR "v0.6 2025-04-13 Pico2 as DAQ MCU"
 
-#define USE_SPI 1
-// Alternative is to use PIO
+#define USE_SPI 0
+// If USE_SPI==0, we use the PIO.
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
