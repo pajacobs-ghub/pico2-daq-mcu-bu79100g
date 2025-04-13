@@ -1,4 +1,4 @@
-// mcp3301_pio.c
+// pico2_daq_mcp3301.c
 //
 // RP2350 Pico2 board as the DAQ-MCU, getting data from a single MCP3301.
 //

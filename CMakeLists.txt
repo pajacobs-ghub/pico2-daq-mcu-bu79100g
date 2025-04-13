@@ -20,14 +20,14 @@ add_compile_options(-Wall
         -Wno-format # int != int32_t because gcc has int32_t as long int
         )
 
-add_executable(mcp3301_pio)
+add_executable(pico2_daq_mcp3301)
 
-pico_generate_pio_header(mcp3301_pio ${CMAKE_CURRENT_LIST_DIR}/mcp3301.pio)
+pico_generate_pio_header(pico2_daq_mcp3301 ${CMAKE_CURRENT_LIST_DIR}/mcp3301.pio)
 
-target_sources(mcp3301_pio PRIVATE mcp3301_pio.c)
+target_sources(pico2_daq_mcp3301 PRIVATE pico2_daq_mcp3301.c)
 
 # pull in common dependencies
-target_link_libraries(mcp3301_pio PRIVATE
+target_link_libraries(pico2_daq_mcp3301 PRIVATE
 	pico_stdlib 
 	hardware_pio
 	hardware_timer
@@ -35,11 +35,11 @@ target_link_libraries(mcp3301_pio PRIVATE
 	)
 
 # enable uart0
-pico_enable_stdio_uart(mcp3301_pio 1)
+pico_enable_stdio_uart(pico2_daq_mcp3301 1)
 
 # create map/bin/hex file etc.
-pico_add_extra_outputs(mcp3301_pio)
+pico_add_extra_outputs(pico2_daq_mcp3301)
 
 # add url via pico_set_program_url
-pico_set_program_url(mcp3301_pio "https://github.com/pajacobs-ghub/mcp3301-adc-with-pio")
+pico_set_program_url(pico2_daq_mcp3301 "https://github.com/pajacobs-ghub/mcp3301-adc-with-pio")
 
