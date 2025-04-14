@@ -5,8 +5,10 @@
 // PJ 2025-04-06: simple interpreter without any pio interaction
 //    2025-04-09: data being collected from MCP3301 chip 0 via SPI0.
 //    2025-04-13: have the PIO working to collect MCP3301 0 data.
+//    2025-04-14: move PIO-RX pin so that we have room for 8 RX pins.
 //
 #include "pico/stdlib.h"
+#include "hardware/clocks.h"
 #include "hardware/gpio.h"
 #include "hardware/pio.h"
 #include "hardware/uart.h"
@@ -20,24 +22,16 @@
 #include <ctype.h>
 #include "mcp3301.pio.h"
 
-#define VERSION_STR "v0.6 2025-04-13 Pico2 as DAQ MCU"
-
-#define USE_SPI 0
-// If USE_SPI==0, we use the PIO.
+#define VERSION_STR "v0.7 2025-04-14 Pico2 as DAQ MCU"
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
+const uint FLAG_PIN = 26;
 const uint Pico2_EVENT_PIN = 3;
 const uint SYSTEM_EVENTn_PIN = 2;
-#if USE_SPI
-const uint SPI0_RX_PIN = 4;
-const uint SPI0_CSn_PIN = 5;
-const uint SPI0_CLK_PIN = 6;
-#else
-const uint PIO_RX_PIN = 4;
 const uint PIO_CSn_PIN = 5;
 const uint PIO_CLK_PIN = 6;
-#endif
+const uint PIO_RX0_PIN = 7;
 
 static inline void assert_ready()
 {
@@ -57,6 +51,16 @@ static inline void assert_event()
 static inline void release_event()
 {
 	gpio_put(Pico2_EVENT_PIN, 0);
+}
+
+static inline void raise_flag_pin()
+{
+	gpio_put(FLAG_PIN, 1);
+}
+
+static inline void lower_flag_pin()
+{
+	gpio_put(FLAG_PIN, 0);
 }
 
 static inline uint8_t read_system_event_pin()
@@ -116,7 +120,7 @@ uint32_t oldest_halfword_index_in_data()
     return (halfword_index_has_wrapped_around) ? next_halfword_index_in_data : 0;
 }
 
-void sample_channels(void)
+void __no_inline_not_in_flash_func(sample_channels)(void)
 // Sample the analog channels periodically and store the data in SRAM.
 //
 // For mode=0, we will consider that the trigger event is immediate, at sample 0,
@@ -154,19 +158,13 @@ void sample_channels(void)
     //
     while (samples_remaining > 0) {
         sampling_LED_ON();
+        raise_flag_pin(); // to allow timing via a logic probe.
         // Take the analog sample set.
         // FIX-ME  Presently, we read only MCP3301 chip 0.
 		uint16_t value = 0;
-#		if USE_SPI
-		uint16_t adc_buf[4]; // Somewhere to put the incoming SPI data.
-        spi_read16_blocking(spi0, 0, adc_buf, 1);
-        value = adc_buf[0];
-#		else
-		// PIO flavour
 		pio_sm_put_blocking(pio0, 0, 1);
 		uint32_t pio_data = pio_sm_get_blocking(pio0, 0);
 		value = (uint16_t)pio_data;
-#       endif
         // The first couple of bits are not driven, only 13 should be kept.
         value &= 0x1fff;
         // We need to sign-extend the 13-bit number.
@@ -211,6 +209,7 @@ void sample_channels(void)
                 }
             } // end switch
         }
+        lower_flag_pin();
         bool late_flag = time_reached(timeout);
         // If we arrive late for the timer, for even one sample set, set the global flag.
         if (late_flag) {
@@ -229,7 +228,7 @@ void sample_channels_once()
     uint8_t mode_save = (uint8_t)vregister[3];
     uint16_t samples_remaining_save = (uint16_t)vregister[2];
     //
-    vregister[0] = (uint16_t)200; // Time enough to do a full scan.
+    vregister[0] = (uint16_t)20; // Time enough to do a full scan.
     vregister[3] = 0; // Immediate mode.
     vregister[2] = 1; // One sample set.
     sample_channels();
@@ -345,7 +344,8 @@ void interpret_command(char* cmdStr)
     if (!override_led) gpio_put(LED_PIN, 1); // To indicate start of interpreter activity.
     switch (cmdStr[0]) {
 	case 'v':
-		printf("v %s\n", VERSION_STR);
+		uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
+		printf("v %s %d kHz\n", VERSION_STR, f_clk_sys);
 		break;
 	case 'L':
 		// Turn LED on or off.
@@ -468,18 +468,13 @@ int main()
 	//
     bi_decl(bi_program_description(VERSION_STR));
     bi_decl(bi_1pin_with_name(LED_PIN, "LED output pin"));
+    bi_decl(bi_1pin_with_name(FLAG_PIN, "Flag output pin for timing measurements"));
     bi_decl(bi_1pin_with_name(READY_PIN, "Ready/Busy# output pin"));
     bi_decl(bi_1pin_with_name(Pico2_EVENT_PIN, "Pico2 EVENT output pin"));
     bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "Sense EVENT input pin"));
-#	if USE_SPI
-	bi_decl(bi_1pin_with_name(SPI0_RX_PIN, "SPI0 data input pin"));
-	bi_decl(bi_1pin_with_name(SPI0_CSn_PIN, "SPI0 chip select pin"));
-	bi_decl(bi_1pin_with_name(SPI0_CLK_PIN, "SPI0 clock output pin"));
-#   else
-    bi_decl(bi_1pin_with_name(PIO_RX_PIN, "PIO0 data input pin"));
     bi_decl(bi_1pin_with_name(PIO_CSn_PIN, "PIO0 chip select pin"));
     bi_decl(bi_1pin_with_name(PIO_CLK_PIN, "PIO0 clock output pin"));
-#   endif
+    bi_decl(bi_1pin_with_name(PIO_RX0_PIN, "PIO0 data0 input pin"));
 	//
 	// Flash LED twice at start up.
 	//
@@ -493,18 +488,8 @@ int main()
 	// Eventually, we will move to using the PIO to talk to all 4
 	// of the MCP3301 chips together.
 	//
-#	if USE_SPI
-	// Temporarily, we will use SPI0 to talk to MCP3301 chip 0.
-	spi_init(spi0, 1700000);
-	gpio_set_function(SPI0_CLK_PIN, GPIO_FUNC_SPI);
-	gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
-	gpio_set_function(SPI0_RX_PIN, GPIO_FUNC_SPI);
-	spi_set_format(spi0, 16, SPI_CPHA_0, SPI_CPOL_0, SPI_MSB_FIRST);
-#   else
-	// PIO flavour
 	uint offset = pio_add_program(pio0, &mcp3301_read_program);
 	mcp3301_read_program_init(pio0, 0, offset);
-#   endif
 	//
 	// We output an event pin that gets buffered by the COMMS MCU
 	// and reflected onto the system event line.
@@ -516,6 +501,9 @@ int main()
 	gpio_set_dir(SYSTEM_EVENTn_PIN, GPIO_IN);
 	release_event();
 	//
+    gpio_init(FLAG_PIN);
+    gpio_set_dir(FLAG_PIN, GPIO_OUT);
+    lower_flag_pin();
     did_not_keep_up_during_sampling = 0;
     //
 	// Signal to the COMMS MCU that we are ready.

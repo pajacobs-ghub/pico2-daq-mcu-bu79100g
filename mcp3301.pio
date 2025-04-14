@@ -4,19 +4,20 @@
 ; Hints taken from the C/C++ SDK and
 ; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
 ; 
-; Peter J. 2025-04-12 First cut 
+; Peter J. 2025-04-12 First cut
+;          2025-04-14 Shift the RX Pin, so that we may have several.
 ;
 ; Pin assignments
-; RX (GPIO4) is IN pin 0
 ; CSn (GPIO5) is side-set pin 0
 ; CLK (GPIO6) is side-set pin 1
+; RX0 (GPIO7) is IN pin 0
 
 .program mcp3301_read
 .pio_version RP2350
 .fifo txrx
-; sysclk at 125MHz (8ns period)
+; sysclk at 150MHz (6.667ns period)
 ; Want the PIO instruction cycle to be 200ns
-.clock_div 25.0
+.clock_div 30.0
 .in 1 left
 .side_set 2
 
@@ -43,12 +44,12 @@ public entry_point:
 static inline void mcp3301_read_program_init(PIO pio, uint sm, uint offset)
 {
 	pio_sm_config c = mcp3301_read_program_get_default_config(offset);
-	// RX (DO from MCP3301 0) input on GPIO4
-	sm_config_set_in_pin_base(&c, 4);
-	pio_gpio_init(pio, 4);
+	// RX (DO from MCP3301 0) input on GPIO7
+	sm_config_set_in_pin_base(&c, 7);
+	pio_gpio_init(pio, 7);
 	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
-    hw_set_bits(&pio->input_sync_bypass, 1u << 4);
-    pio_sm_set_consecutive_pindirs(pio, sm, 4, 1, false); // RX input
+    hw_set_bits(&pio->input_sync_bypass, 1u << 7);
+    pio_sm_set_consecutive_pindirs(pio, sm, 7, 1, false); // RX input
     // CSn, CLK output on GPIO5 and GPIO6, respectively
 	sm_config_set_sideset_pin_base(&c, 5);
 	pio_gpio_init(pio, 5); // CSn
