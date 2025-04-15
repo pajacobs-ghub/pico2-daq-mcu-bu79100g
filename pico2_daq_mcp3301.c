@@ -1,6 +1,6 @@
 // pico2_daq_mcp3301.c
 //
-// RP2350 Pico2 board as the DAQ-MCU, getting data from a single MCP3301.
+// RP2350 Pico2 board as the DAQ-MCU, getting data from 8 MCP3301 chips.
 //
 // PJ 2025-04-06: simple interpreter without any pio interaction
 //    2025-04-09: data being collected from MCP3301 chip 0 via SPI0.
@@ -23,8 +23,8 @@
 #include <ctype.h>
 #include "mcp3301.pio.h"
 
-#define VERSION_STR "v0.8 2025-04-15 Pico2 as DAQ MCU"
-// #define EIGHT_MCP3301
+#define VERSION_STR "v0.8 2025-04-15 Pico2 as DAQ-MCU"
+#define EIGHT_MCP3301
 #ifdef EIGHT_MCP3301
 const uint n_mcp3301_chips = 8;
 #else
@@ -98,7 +98,7 @@ static inline void sampling_LED_OFF()
 }
 
 // A place for the current samples.
-#define MAXNCHAN 4
+#define MAXNCHAN 8
 int16_t res[MAXNCHAN];
 
 // A place to collect the full record.
@@ -117,7 +117,7 @@ int16_t vregister[NUMREG]; // working copy in SRAM
 void set_registers_to_original_values()
 {
     vregister[0] = 100;  // sample period in microseconds (timer ticks)
-    vregister[1] = 4;    // number of channels to sample 1, 2 or 4; (3 does not fit neatly)
+    vregister[1] = 8;    // number of channels to sample 1, 2, 4 or 8; (these fit neatly)
     vregister[2] = 128;  // number of samples in record after trigger event
     vregister[3] = 0;    // trigger mode 0=immediate, 1=internal, 2=external
     vregister[4] = 0;    // trigger channel for internal trigger
@@ -136,7 +136,7 @@ static inline uint32_t oldest_halfword_index_in_data()
     return (halfword_index_has_wrapped_around) ? next_halfword_index_in_data : 0;
 }
 
-static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], uint least_bit) {
+static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], uint bit_base) {
 	// 
 	// There are 8 by 4-bit values interleaved.
 	// 31     24       16       8        0  bits in word
@@ -149,7 +149,7 @@ static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], ui
 	for (uint rxi=0; rxi < 8; rxi++) {
 		for (uint bin=0; bin < 4; bin++) {
 			if (word & (1u << (bin*8 + rxi))) {
-				values[rxi] |= 1 << (bin + least_bit);
+				values[rxi] |= 1u << (bin + bit_base);
 			}
 		}
 	}
@@ -211,8 +211,9 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
 		word = pio_sm_get_blocking(pio0, 0);
 		unpack_nybbles_from_word(word, values, 0);
         for (uint ch=0; ch < n_chan; ch++) {
-			// The first couple of bits are not driven, only 13 should be kept.
-			uint16_t value = values[ch] & 0x1fff;
+			// Bits 15 and 14 are not driven.  Bit 13 is the zero bit.
+			// The signed number is in bits 12 down to 0.
+			uint16_t value = values[ch] & 0x3fff;
 			// We need to sign-extend the 13-bit number.
 			if (value & 0x1000) { value |= 0xe000; }
 			res[ch] = (int16_t)value;
@@ -403,6 +404,7 @@ void interpret_command(char* cmdStr)
     if (!override_led) gpio_put(LED_PIN, 1); // To indicate start of interpreter activity.
     switch (cmdStr[0]) {
 	case 'v':
+		// Report version string and (some) configuration details.
 		uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
 		printf("v %s %dxMCP3301 %d kHz\n", VERSION_STR, n_mcp3301_chips, f_clk_sys);
 		break;
@@ -422,6 +424,10 @@ void interpret_command(char* cmdStr)
 			// There was no text to give a value.
 			printf("L error: no value\n");
 		}
+		break;
+	case 'n':
+		// Report number of virtual registers.
+		printf("n %d\n", NUMREG);
 		break;
     case 'r':
         // Report a selected register value.
@@ -516,6 +522,7 @@ void interpret_command(char* cmdStr)
 
 int main()
 {
+	set_registers_to_original_values();
     stdio_init_all();
 	uart_set_baudrate(uart0, 230400);
 	// Attempt to discard any characters sitting the UART already.

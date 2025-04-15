@@ -1,5 +1,5 @@
 ; mcp3301.pio
-; Collect data from a single MCP3301 chip.
+; Collect data from the MCP3301 chips via the PIO.
 ;
 ; Hints taken from the C/C++ SDK and
 ; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
@@ -67,7 +67,7 @@ static inline void mcp3301_one_read_program_init(PIO pio, uint sm, uint offset)
 
 
 .program mcp3301_eight_read
-; Pin assignments for a eight mcp3301 chips.
+; Pin assignments for eight mcp3301 chips.
 ; CSn (GPIO5) is side-set pin 0
 ; CLK (GPIO6) is side-set pin 1
 ; RX0 (GPIO7) is IN pin 0
@@ -122,7 +122,7 @@ static inline void mcp3301_eight_read_program_init(PIO pio, uint sm, uint offset
 	pio_gpio_init(pio, 13); gpio_pull_down(13);
 	pio_gpio_init(pio, 14); gpio_pull_down(14);
 	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
-    hw_set_bits(&pio->input_sync_bypass, 0xffu << 7);
+    hw_set_bits(&pio->input_sync_bypass, 0xff << 7);
     pio_sm_set_consecutive_pindirs(pio, sm, 7, 8, false); // RX input
     //
     // CSn, CLK output on GPIO5 and GPIO6, respectively
