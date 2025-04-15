@@ -6,13 +6,14 @@
 ; 
 ; Peter J. 2025-04-12 First cut
 ;          2025-04-14 Shift the RX Pin, so that we may have several.
+;          2025-04-15 Add program for reading eight chips together.
 ;
-; Pin assignments
+
+.program mcp3301_one_read
+; Pin assignments for a single mcp3301
 ; CSn (GPIO5) is side-set pin 0
 ; CLK (GPIO6) is side-set pin 1
 ; RX0 (GPIO7) is IN pin 0
-
-.program mcp3301_read
 .pio_version RP2350
 .fifo txrx
 ; sysclk at 150MHz (6.667ns period)
@@ -40,23 +41,97 @@ public entry_point:
 	set x, 15       side 0x0      ; take CSn low, keep CLK low
 .wrap
 
+
 % c-sdk {
-static inline void mcp3301_read_program_init(PIO pio, uint sm, uint offset)
+static inline void mcp3301_one_read_program_init(PIO pio, uint sm, uint offset)
 {
-	pio_sm_config c = mcp3301_read_program_get_default_config(offset);
+	pio_sm_config c = mcp3301_one_read_program_get_default_config(offset);
+	//
 	// RX (DO from MCP3301 0) input on GPIO7
 	sm_config_set_in_pin_base(&c, 7);
-	pio_gpio_init(pio, 7);
+	pio_gpio_init(pio, 7); gpio_pull_down(7);
 	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
     hw_set_bits(&pio->input_sync_bypass, 1u << 7);
     pio_sm_set_consecutive_pindirs(pio, sm, 7, 1, false); // RX input
+    //
     // CSn, CLK output on GPIO5 and GPIO6, respectively
 	sm_config_set_sideset_pin_base(&c, 5);
 	pio_gpio_init(pio, 5); // CSn
 	pio_gpio_init(pio, 6); // CLK
 	pio_sm_set_consecutive_pindirs(pio, sm, 5, 2, true);
+	//
+	pio_sm_init(pio, sm, offset + mcp3301_one_read_offset_entry_point, &c);
+	pio_sm_set_enabled(pio, sm, true);
+}
+%}
+
+
+.program mcp3301_eight_read
+; Pin assignments for a eight mcp3301 chips.
+; CSn (GPIO5) is side-set pin 0
+; CLK (GPIO6) is side-set pin 1
+; RX0 (GPIO7) is IN pin 0
+; RX1 (GPIO8) is IN pin 1
+; RX2 (GPIO9) is IN pin 2
+; RX3 (GPIO10) is IN pin 3
+; RX4 (GPIO11) is IN pin 4
+; RX5 (GPIO12) is IN pin 5
+; RX6 (GPIO13) is IN pin 6
+; RX7 (GPIO14) is IN pin 7
+.pio_version RP2350
+.fifo txrx
+; sysclk at 150MHz (6.667ns period)
+; Want the PIO instruction cycle to be 200ns
+.clock_div 30.0
+.in 8 left auto
+.side_set 2
+
+.wrap_target
+bitloop:
+	nop             side 0x0 [1]  ; CLK low
+	in pins, 8      side 0x2      ; read RX pins, set CLK high
+	jmp x-- bitloop side 0x2      ; CLK stays high as we go for the next bit.
 	
-	pio_sm_init(pio, sm, offset + mcp3301_read_offset_entry_point, &c);
+	; If we fall-through to here, all bits are now shifted in
+	; so we push them into the RX FIFO.
+	push iffull     side 0x0      ; take CLK low
+	nop             side 0x0 [1]  ; keep CSn low a while longer
+	
+public entry_point:
+    ; We block here until the CPU writes a word to the TX FIFO.
+    ; We don't actually use that word as data but as a release.
+	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
+	; We count the bits down, from 15 to 0.
+	set x, 15       side 0x0      ; take CSn low, keep CLK low
+.wrap
+
+
+% c-sdk {
+static inline void mcp3301_eight_read_program_init(PIO pio, uint sm, uint offset)
+{
+	pio_sm_config c = mcp3301_eight_read_program_get_default_config(offset);
+	//
+	// RX (MCP3301 chips 0 through 7) input on GPIO7 through GPIO14
+	sm_config_set_in_pin_base(&c, 7);
+	pio_gpio_init(pio, 7); gpio_pull_down(7);
+	pio_gpio_init(pio, 8); gpio_pull_down(8);
+	pio_gpio_init(pio, 9); gpio_pull_down(9);
+	pio_gpio_init(pio, 10); gpio_pull_down(10);
+	pio_gpio_init(pio, 11); gpio_pull_down(11);
+	pio_gpio_init(pio, 12); gpio_pull_down(12);
+	pio_gpio_init(pio, 13); gpio_pull_down(13);
+	pio_gpio_init(pio, 14); gpio_pull_down(14);
+	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
+    hw_set_bits(&pio->input_sync_bypass, 0xffu << 7);
+    pio_sm_set_consecutive_pindirs(pio, sm, 7, 8, false); // RX input
+    //
+    // CSn, CLK output on GPIO5 and GPIO6, respectively
+	sm_config_set_sideset_pin_base(&c, 5);
+	pio_gpio_init(pio, 5); // CSn
+	pio_gpio_init(pio, 6); // CLK
+	pio_sm_set_consecutive_pindirs(pio, sm, 5, 2, true);
+	//
+	pio_sm_init(pio, sm, offset + mcp3301_one_read_offset_entry_point, &c);
 	pio_sm_set_enabled(pio, sm, true);
 }
 %}

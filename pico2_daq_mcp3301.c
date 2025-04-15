@@ -6,6 +6,7 @@
 //    2025-04-09: data being collected from MCP3301 chip 0 via SPI0.
 //    2025-04-13: have the PIO working to collect MCP3301 0 data.
 //    2025-04-14: move PIO-RX pin so that we have room for 8 RX pins.
+//    2025-04-15: implement code for reading 8 MCP3301 chips.
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -22,7 +23,13 @@
 #include <ctype.h>
 #include "mcp3301.pio.h"
 
-#define VERSION_STR "v0.7 2025-04-14 Pico2 as DAQ MCU"
+#define VERSION_STR "v0.8 2025-04-15 Pico2 as DAQ MCU"
+// #define EIGHT_MCP3301
+#ifdef EIGHT_MCP3301
+const uint n_mcp3301_chips = 8;
+#else
+const uint n_mcp3301_chips = 1;
+#endif
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
@@ -32,6 +39,15 @@ const uint SYSTEM_EVENTn_PIN = 2;
 const uint PIO_CSn_PIN = 5;
 const uint PIO_CLK_PIN = 6;
 const uint PIO_RX0_PIN = 7;
+#ifdef EIGHT_MCP3301
+const uint PIO_RX1_PIN = 8;
+const uint PIO_RX2_PIN = 9;
+const uint PIO_RX3_PIN = 10;
+const uint PIO_RX4_PIN = 11;
+const uint PIO_RX5_PIN = 12;
+const uint PIO_RX6_PIN = 13;
+const uint PIO_RX7_PIN = 14;
+#endif
 
 static inline void assert_ready()
 {
@@ -109,15 +125,34 @@ void set_registers_to_original_values()
     vregister[6] = 1;    // trigger slope 0=sample-below-level 1=sample-above-level
 }
 
-uint32_t max_n_samples(void)
+static inline uint32_t max_n_samples(void)
 {
     uint8_t n_chan = (uint8_t)vregister[1];
     return N_HALFWORDS / n_chan;
 }
 
-uint32_t oldest_halfword_index_in_data()
+static inline uint32_t oldest_halfword_index_in_data()
 {
     return (halfword_index_has_wrapped_around) ? next_halfword_index_in_data : 0;
+}
+
+static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], uint least_bit) {
+	// 
+	// There are 8 by 4-bit values interleaved.
+	// 31     24       16       8        0  bits in word
+	// |      |        |        |        |
+	// 76543210 76543210 76543210 76543210  RX index (rxi)
+	// ....bit3 ....bit2 ....bit1 ....bit0  bit in nybble (bin)
+	//
+	// We assume that the values were initially set to zero.
+	// This function, over subsequent calls, sets the bits that are 1.
+	for (uint rxi=0; rxi < 8; rxi++) {
+		for (uint bin=0; bin < 4; bin++) {
+			if (word & (1u << (bin*8 + rxi))) {
+				values[rxi] |= 1 << (bin + least_bit);
+			}
+		}
+	}
 }
 
 void __no_inline_not_in_flash_func(sample_channels)(void)
@@ -159,8 +194,31 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     while (samples_remaining > 0) {
         sampling_LED_ON();
         raise_flag_pin(); // to allow timing via a logic probe.
+        //
         // Take the analog sample set.
-        // FIX-ME  Presently, we read only MCP3301 chip 0.
+#		ifdef EIGHT_MCP3301
+        // Read all 8 MCP3301 chips via the PIO.
+        // Each of four 32-bit words coming from the PIO's RX FIFO 
+        // will hold one 4-bit nybble for each of eight MCP3301 bit streams.
+        uint16_t values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+		pio_sm_put_blocking(pio0, 0, 1);
+		uint32_t word = pio_sm_get_blocking(pio0, 0);
+		unpack_nybbles_from_word(word, values, 12);
+		word = pio_sm_get_blocking(pio0, 0);
+		unpack_nybbles_from_word(word, values, 8);
+		word = pio_sm_get_blocking(pio0, 0);
+		unpack_nybbles_from_word(word, values, 4);
+		word = pio_sm_get_blocking(pio0, 0);
+		unpack_nybbles_from_word(word, values, 0);
+        for (uint ch=0; ch < n_chan; ch++) {
+			// The first couple of bits are not driven, only 13 should be kept.
+			uint16_t value = values[ch] & 0x1fff;
+			// We need to sign-extend the 13-bit number.
+			if (value & 0x1000) { value |= 0xe000; }
+			res[ch] = (int16_t)value;
+		}
+#       else
+        // Read only MCP3301 chip 0.
 		uint16_t value = 0;
 		pio_sm_put_blocking(pio0, 0, 1);
 		uint32_t pio_data = pio_sm_get_blocking(pio0, 0);
@@ -173,7 +231,8 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
         for (uint8_t ch=1; ch < n_chan; ch++) {
             res[ch] = (int16_t)0;
         }
-        // Save the sample for later.
+#       endif
+        // Save the sample set for later.
         for (uint8_t ch=0; ch < n_chan; ch++) {
             data[next_halfword_index_in_data+ch] = res[ch];
         }
@@ -183,7 +242,6 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
             next_halfword_index_in_data -= N_HALFWORDS;
             halfword_index_has_wrapped_around = 1;
         }
-        sampling_LED_OFF();
         //
         if (post_event) {
             // Trigger event has happened.
@@ -210,6 +268,7 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
             } // end switch
         }
         lower_flag_pin();
+        sampling_LED_OFF();
         bool late_flag = time_reached(timeout);
         // If we arrive late for the timer, for even one sample set, set the global flag.
         if (late_flag) {
@@ -345,7 +404,7 @@ void interpret_command(char* cmdStr)
     switch (cmdStr[0]) {
 	case 'v':
 		uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
-		printf("v %s %d kHz\n", VERSION_STR, f_clk_sys);
+		printf("v %s %dxMCP3301 %d kHz\n", VERSION_STR, n_mcp3301_chips, f_clk_sys);
 		break;
 	case 'L':
 		// Turn LED on or off.
@@ -475,6 +534,15 @@ int main()
     bi_decl(bi_1pin_with_name(PIO_CSn_PIN, "PIO0 chip select pin"));
     bi_decl(bi_1pin_with_name(PIO_CLK_PIN, "PIO0 clock output pin"));
     bi_decl(bi_1pin_with_name(PIO_RX0_PIN, "PIO0 data0 input pin"));
+#   ifdef EIGHT_MCP3301
+    bi_decl(bi_1pin_with_name(PIO_RX1_PIN, "PIO0 data1 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX2_PIN, "PIO0 data2 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX3_PIN, "PIO0 data3 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX4_PIN, "PIO0 data4 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX5_PIN, "PIO0 data5 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX6_PIN, "PIO0 data6 input pin"));
+    bi_decl(bi_1pin_with_name(PIO_RX7_PIN, "PIO0 data7 input pin"));
+#   endif
 	//
 	// Flash LED twice at start up.
 	//
@@ -485,11 +553,15 @@ int main()
 	sampling_LED_ON(); sleep_ms(500);
 	sampling_LED_OFF();
 	//
-	// Eventually, we will move to using the PIO to talk to all 4
-	// of the MCP3301 chips together.
+	// Start the PIO state machine to talk to the MCP3301 chips.
 	//
-	uint offset = pio_add_program(pio0, &mcp3301_read_program);
-	mcp3301_read_program_init(pio0, 0, offset);
+#   ifdef EIGHT_MCP3301
+	uint offset = pio_add_program(pio0, &mcp3301_eight_read_program);
+	mcp3301_eight_read_program_init(pio0, 0, offset);
+#   else
+	uint offset = pio_add_program(pio0, &mcp3301_one_read_program);
+	mcp3301_one_read_program_init(pio0, 0, offset);
+#   endif
 	//
 	// We output an event pin that gets buffered by the COMMS MCU
 	// and reflected onto the system event line.
