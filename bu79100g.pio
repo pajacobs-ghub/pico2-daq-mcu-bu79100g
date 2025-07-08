@@ -4,68 +4,7 @@
 ; Hints taken from the C/C++ SDK and
 ; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
 ;
-; Peter J. 2025-04-12 First cut
-;          2025-04-14 Shift the RX Pin, so that we may have several.
-;          2025-04-15 Add program for reading eight chips together.
-;          2025-07-07 Adapt to driving BU79100G ADC chips.
-;
-
-.program bu79100g_one_read
-; Pin assignments for a single bu79100g
-; CSn (GPIO5) is side-set pin 0
-; CLK (GPIO6) is side-set pin 1
-; RX0 (GPIO7) is IN pin 0
-.pio_version RP2350
-.fifo txrx
-; sysclk at 150MHz (6.667ns period)
-; Want the PIO instruction cycle to be 50ns
-.clock_div 7.5
-.in 1 left
-.side_set 2
-
-.wrap_target
-bitloop:
-	nop             side 0x0 [1]  ; CLK low
-	in pins, 1      side 0x2      ; read RX pin, set CLK high
-	jmp x-- bitloop side 0x2      ; CLK stays high as we go for the next bit.
-
-	; If we fall-through to here, all bits are now shifted in
-	; so we push them into the RX FIFO.
-	push            side 0x0      ; take CLK low
-	nop             side 0x0 [1]  ; keep CSn low a while longer
-
-public entry_point:
-    ; We block here until the CPU writes a word to the TX FIFO.
-    ; We don't actually use that word as data but as a release.
-	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
-	; We count the bits down, from 15 to 0.
-	set x, 15       side 0x0      ; take CSn low, keep CLK low
-.wrap
-
-
-% c-sdk {
-static inline void bu79100g_one_read_program_init(PIO pio, uint sm, uint offset)
-{
-	pio_sm_config c = bu79100g_one_read_program_get_default_config(offset);
-	//
-	// RX (DO from BU79100G chip 0) input on GPIO7
-	sm_config_set_in_pin_base(&c, 7);
-	pio_gpio_init(pio, 7); gpio_pull_down(7);
-	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
-    hw_set_bits(&pio->input_sync_bypass, 1u << 7);
-    pio_sm_set_consecutive_pindirs(pio, sm, 7, 1, false); // RX input
-    //
-    // CSn, CLK output on GPIO5 and GPIO6, respectively
-	sm_config_set_sideset_pin_base(&c, 5);
-	pio_gpio_init(pio, 5); // CSn
-	pio_gpio_init(pio, 6); // CLK
-	pio_sm_set_consecutive_pindirs(pio, sm, 5, 2, true);
-	//
-	pio_sm_init(pio, sm, offset + bu79100g_one_read_offset_entry_point, &c);
-	pio_sm_set_enabled(pio, sm, true);
-}
-%}
-
+; Peter J. 2025-07-08
 
 .program bu79100g_eight_read
 ; Pin assignments for eight BU79100G ADC chips.
@@ -82,28 +21,27 @@ static inline void bu79100g_one_read_program_init(PIO pio, uint sm, uint offset)
 .pio_version RP2350
 .fifo txrx
 ; sysclk at 150MHz (6.667ns period)
-; Want the PIO instruction cycle to be 50ns
-.clock_div 7.5
+; Want the PIO instruction cycle to be 30ns
+.clock_div 4.5
 .in 8 left auto
 .side_set 2
 
 .wrap_target
 bitloop:
-	nop             side 0x0 [1]  ; CLK low
-	in pins, 8      side 0x2      ; read RX pins, set CLK high
-	jmp x-- bitloop side 0x2      ; CLK stays high as we go for the next bit.
+	in pins, 8      side 0x2 [1]  ; read RX pins, set CLK high
+	jmp x-- bitloop side 0x0 [1]  ; take CLK low as we go around for the next bit.
 
 	; If we fall-through to here, all bits are now shifted in
 	; so we push them into the RX FIFO.
-	push iffull     side 0x0      ; take CLK low
-	nop             side 0x0 [1]  ; keep CSn low a while longer
+	push iffull     side 0x0      ; keep CLK low
+	nop             side 0x1      ; take CSn high to allow ADC track mode to continue
 
 public entry_point:
     ; We block here until the CPU writes a word to the TX FIFO.
     ; We don't actually use that word as data but as a release.
 	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
 	; We count the bits down, from 15 to 0.
-	set x, 15       side 0x0      ; take CSn low, keep CLK low
+	set x, 15       side 0x0 [1]  ; take CSn low, keep CLK low and start to collect bits
 .wrap
 
 
@@ -129,7 +67,11 @@ static inline void bu79100g_eight_read_program_init(PIO pio, uint sm, uint offse
     // CSn, CLK output on GPIO5 and GPIO6, respectively
 	sm_config_set_sideset_pin_base(&c, 5);
 	pio_gpio_init(pio, 5); // CSn
+    gpio_set_slew_rate(5, GPIO_SLEW_RATE_FAST);
+    gpio_set_drive_strength(5, GPIO_DRIVE_STRENGTH_12MA);
 	pio_gpio_init(pio, 6); // CLK
+    gpio_set_slew_rate(6, GPIO_SLEW_RATE_FAST);
+    gpio_set_drive_strength(6, GPIO_DRIVE_STRENGTH_12MA);
 	pio_sm_set_consecutive_pindirs(pio, sm, 5, 2, true);
 	//
 	pio_sm_init(pio, sm, offset + bu79100g_eight_read_offset_entry_point, &c);

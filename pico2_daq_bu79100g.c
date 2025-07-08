@@ -24,13 +24,8 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.9 2025-07-07 Pico2 as DAQ-MCU with"
-#define EIGHT_ADC_CHIPS
-#ifdef EIGHT_ADC_CHIPS
+#define VERSION_STR "v0.10 2025-07-08 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
-#else
-const uint n_adc_chips = 1;
-#endif
 
 // Names for the IO pins.
 const uint READY_PIN = 22;
@@ -40,7 +35,6 @@ const uint SYSTEM_EVENTn_PIN = 2;
 const uint PIO_CSn_PIN = 5;
 const uint PIO_CLK_PIN = 6;
 const uint PIO_RX0_PIN = 7;
-#ifdef EIGHT_ADC_CHIPS
 const uint PIO_RX1_PIN = 8;
 const uint PIO_RX2_PIN = 9;
 const uint PIO_RX3_PIN = 10;
@@ -48,7 +42,6 @@ const uint PIO_RX4_PIN = 11;
 const uint PIO_RX5_PIN = 12;
 const uint PIO_RX6_PIN = 13;
 const uint PIO_RX7_PIN = 14;
-#endif
 
 static inline void assert_ready()
 {
@@ -98,20 +91,30 @@ static inline void sampling_LED_OFF()
     gpio_put(LED_PIN, 0);
 }
 
-// A place for the current samples.
-#define MAXNCHAN 8
-int16_t res[MAXNCHAN];
+// Unlike the AVR DAQ firmware, we are going to hard-code the number of
+// channels at 8 (because that is how we have to set up the PIO) and we
+// are going to use uint16_t (a.k.a. half-words) as the sample type.
+// Sample sets are going to be captured as sets of four uint32_t words,
+// that may be decoded into 8 uint16_t half-words.
 
-// A place to collect the full record.
-#define N_HALFWORDS 0x00020000
-int16_t data[N_HALFWORDS];
-uint32_t next_halfword_index_in_data;
-uint8_t halfword_index_has_wrapped_around;
+// A place for the current samples.
+#define N_CHAN 8
+uint16_t res[N_CHAN];
+
+// A place to collect teh sample sets as they come in from the ADC chips.
+#define N_FULLWORDS 0x00010000
+#define MAX_N_SAMPLES (N_FULLWORDS/4)
+uint32_t data[N_FULLWORDS];
+uint32_t next_fullword_index_in_data;
+uint8_t fullword_index_has_wrapped_around;
 
 uint8_t event_n;
 uint8_t did_not_keep_up_during_sampling;
 
 // Parameters controlling the device are stored in virtual config registers.
+// [FIX-ME] It may be better to store parameters as int32_t on the Pico2.
+// There seems to be no advantage to using 16 bits on a 32-bit MCU and
+// there will be fewer surprises with full 32-bit values.
 #define NUMREG 7
 int16_t vregister[NUMREG]; // working copy in SRAM
 
@@ -119,24 +122,18 @@ void set_registers_to_original_values()
 {
     // [FIX-ME] Maybe we should have the sample period be set by the PIO cycle.
     // The timer ticks resolution will be inadequate for a 1us sample period.
-    vregister[0] = 10;   // sample period in microseconds (timer ticks)
-    vregister[1] = 8;    // number of channels to sample 1, 2, 4 or 8; (these fit neatly)
-    vregister[2] = 128;  // number of samples in record after trigger event
-    vregister[3] = 0;    // trigger mode 0=immediate, 1=internal, 2=external
-    vregister[4] = 0;    // trigger channel for internal trigger
-    vregister[5] = 100;  // trigger level as a signed integer
-    vregister[6] = 1;    // trigger slope 0=sample-below-level 1=sample-above-level
+    vregister[0] = 10;     // sample period in microseconds (timer ticks)
+    vregister[1] = N_CHAN; // number of channels to sample ia always 8.
+    vregister[2] = 128;    // number of samples in record after trigger event
+    vregister[3] = 0;      // trigger mode 0=immediate, 1=internal, 2=external
+    vregister[4] = 0;      // trigger channel for internal trigger
+    vregister[5] = 100;    // trigger level as a signed integer
+    vregister[6] = 1;      // trigger slope 0=sample-below-level 1=sample-above-level
 }
 
-static inline uint32_t max_n_samples(void)
+static inline uint32_t oldest_fullword_index_in_data()
 {
-    uint8_t n_chan = (uint8_t)vregister[1];
-    return N_HALFWORDS / n_chan;
-}
-
-static inline uint32_t oldest_halfword_index_in_data()
-{
-    return (halfword_index_has_wrapped_around) ? next_halfword_index_in_data : 0;
+    return (fullword_index_has_wrapped_around) ? next_fullword_index_in_data : 0;
 }
 
 static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], uint bit_base) {
@@ -158,6 +155,14 @@ static inline void unpack_nybbles_from_word(uint32_t word, uint16_t values[], ui
 	}
 }
 
+void __no_inline_not_in_flash_func(unpack_sample_set)(uint32_t* here, uint16_t values[]) {
+    // Unpacks the four 32-bit words, starting from here.
+    unpack_nybbles_from_word(*here, values, 12);
+    unpack_nybbles_from_word(*(here+1), values, 8);
+    unpack_nybbles_from_word(*(here+2), values, 4);
+    unpack_nybbles_from_word(*(here+3), values, 0);
+}
+
 void __no_inline_not_in_flash_func(sample_channels)(void)
 // Sample the analog channels periodically and store the data in SRAM.
 //
@@ -176,18 +181,17 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
 {
     // Get configuration data from virtual registers.
     uint16_t period_us = (uint16_t)vregister[0];
-    uint8_t n_chan = (uint8_t)vregister[1];
     uint8_t mode = (uint8_t)vregister[3];
 # define TRIGGER_IMMEDIATE 0
 # define TRIGGER_INTERNAL 1
 # define TRIGGER_EXTERNAL 2
     uint8_t trigger_chan = (uint8_t)vregister[4];
-    int16_t trigger_level = vregister[5];
+    uint16_t trigger_level = (uint16_t) vregister[5];
     uint8_t trigger_slope = (uint8_t)vregister[6];
     //
     release_event();
-    next_halfword_index_in_data = 0; // Start afresh, at index 0.
-    halfword_index_has_wrapped_around = 0;
+    next_fullword_index_in_data = 0; // Start afresh, at index 0.
+    fullword_index_has_wrapped_around = 0;
     uint8_t post_event = 0;
     uint16_t samples_remaining = (uint16_t)vregister[2];
     did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
@@ -199,54 +203,15 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
         raise_flag_pin(); // to allow timing via a logic probe.
         //
         // Take the analog sample set.
-#		ifdef EIGHT_ADC_CHIPS
         // Read all 8 ADC chips via the PIO.
         // Each of four 32-bit words coming from the PIO's RX FIFO
-        // will hold one 4-bit nybble for each of eight bit streams.
-        uint16_t values[8] = {0, 0, 0, 0, 0, 0, 0, 0};
+        // will hold one 4-bit nybble for each of eight ADC bit streams.
 		pio_sm_put_blocking(pio0, 0, 1);
-		uint32_t word = pio_sm_get_blocking(pio0, 0);
-		unpack_nybbles_from_word(word, values, 12);
-		word = pio_sm_get_blocking(pio0, 0);
-		unpack_nybbles_from_word(word, values, 8);
-		word = pio_sm_get_blocking(pio0, 0);
-		unpack_nybbles_from_word(word, values, 4);
-		word = pio_sm_get_blocking(pio0, 0);
-		unpack_nybbles_from_word(word, values, 0);
-        for (uint ch=0; ch < n_chan; ch++) {
-			// Bits 15 and 14 are not driven.  Bit 13 is the zero bit.
-			// The signed number is in bits 12 down to 0.
-			uint16_t value = values[ch] & 0x3fff;
-			// We need to sign-extend the 13-bit number.
-			if (value & 0x1000) { value |= 0xe000; }
-			res[ch] = (int16_t)value;
-		}
-#       else
-        // Read only ADC chip 0.
-		uint16_t value = 0;
-		pio_sm_put_blocking(pio0, 0, 1);
-		uint32_t pio_data = pio_sm_get_blocking(pio0, 0);
-		value = (uint16_t)pio_data;
-        // [FIX-ME] sign extending is not needed for the 12-bit BU79100G result.
-        // The first couple of bits are not driven, only 13 should be kept.
-        value &= 0x1fff;
-        // We need to sign-extend the 13-bit number.
-        if (value & 0x1000) { value |= 0xe000; }
-        res[0] = (int16_t)value;
-        for (uint8_t ch=1; ch < n_chan; ch++) {
-            res[ch] = (int16_t)0;
-        }
-#       endif
-        // Save the sample set for later.
-        for (uint8_t ch=0; ch < n_chan; ch++) {
-            data[next_halfword_index_in_data+ch] = res[ch];
-        }
-        // Point to the next available halfword index.
-        next_halfword_index_in_data += n_chan;
-        if (next_halfword_index_in_data >= N_HALFWORDS) {
-            next_halfword_index_in_data -= N_HALFWORDS;
-            halfword_index_has_wrapped_around = 1;
-        }
+        uint32_t* here = &data[next_fullword_index_in_data];
+        *here = pio_sm_get_blocking(pio0, 0);
+		*(here+1) = pio_sm_get_blocking(pio0, 0);
+		*(here+2) = pio_sm_get_blocking(pio0, 0);
+		*(here+3) = pio_sm_get_blocking(pio0, 0);
         //
         if (post_event) {
             // Trigger event has happened.
@@ -259,18 +224,28 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
                 assert_event();
                 break;
             case TRIGGER_INTERNAL: {
-                int16_t s = res[trigger_chan];
+                // Will only have time to do this if we are sampling slowly enough.
+                uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
+                unpack_sample_set(here, values);
+                uint16_t s = res[trigger_chan];
                 if ((trigger_slope == 1 && s >= trigger_level) ||
                     (trigger_slope == 0 && s <= trigger_level)) {
                     post_event = 1;
                     assert_event();
-                } }
+                }
+                }
                 break;
             case TRIGGER_EXTERNAL:
                 if (read_system_event_pin() == 0) {
                     post_event = 1;
                 }
             } // end switch
+        }
+        // Point to the next available fullword index.
+        next_fullword_index_in_data += 4;
+        if (next_fullword_index_in_data >= N_FULLWORDS) {
+            next_fullword_index_in_data -= N_FULLWORDS;
+            fullword_index_has_wrapped_around = 1;
         }
         lower_flag_pin();
         sampling_LED_OFF();
@@ -292,7 +267,7 @@ void sample_channels_once()
     uint8_t mode_save = (uint8_t)vregister[3];
     uint16_t samples_remaining_save = (uint16_t)vregister[2];
     //
-    vregister[0] = (uint16_t)20; // Time enough to do a full scan.
+    vregister[0] = (uint16_t)10; // Time enough to do a full scan.
     vregister[3] = 0; // Immediate mode.
     vregister[2] = 1; // One sample set.
     sample_channels();
@@ -311,16 +286,15 @@ char str_buf2[NSTRBUF2];
 
 char* sample_set_to_str(uint32_t n)
 {
-    uint8_t n_chan = (uint8_t)vregister[1];
+    uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
     // Start with index of oldest sample, then move to selected sample.
-    uint32_t index = oldest_halfword_index_in_data();
-    index += n_chan * n;
-    // Assume that the halfword sets in the data wrap neatly.
-	if (index > N_HALFWORDS) { index -= N_HALFWORDS; }
-	for (uint8_t ch=0; ch < n_chan; ch++) { res[ch] = data[index+ch]; }
-    snprintf(str_buf1, NSTRBUF1, "%d", res[0]);
-    for (uint8_t ch=1; ch < n_chan; ch++) {
-        snprintf(str_buf2, NSTRBUF2, " %d", res[ch]);
+    uint32_t word_index = oldest_fullword_index_in_data() + 4*n;
+    // Assume that the fullword sets in the data wrap neatly.
+	if (word_index > N_FULLWORDS) { word_index -= N_FULLWORDS; }
+    unpack_sample_set(&(data[word_index]), values);
+    snprintf(str_buf1, NSTRBUF1, "%d", values[0]);
+    for (uint8_t ch=1; ch < N_CHAN; ch++) {
+        snprintf(str_buf2, NSTRBUF2, " %d", values[ch]);
         strncat(str_buf1, str_buf2, NSTRBUF2);
     }
     return str_buf1;
@@ -460,8 +434,14 @@ void interpret_command(char* cmdStr)
                 if (token_ptr) {
                     // Assume text is value for register.
                     v = (int16_t) atoi(token_ptr);
-                    vregister[i] = v;
-                    printf("s reg[%u] set to %d\n", i, v);
+                    if (i != 1) {
+                        // Accept user-specified value.
+                        vregister[i] = v;
+                        printf("s reg[%u] set to %d\n", i, v);
+                    } else {
+                        // Ignore user input.
+                        printf("s reg[%u] set to %d\n", i, N_CHAN);
+                    }
                 } else {
                     printf("s error: no value given.\n");
                 }
@@ -545,7 +525,6 @@ int main()
     bi_decl(bi_1pin_with_name(PIO_CSn_PIN, "PIO0 chip select pin"));
     bi_decl(bi_1pin_with_name(PIO_CLK_PIN, "PIO0 clock output pin"));
     bi_decl(bi_1pin_with_name(PIO_RX0_PIN, "PIO0 data0 input pin"));
-#   ifdef EIGHT_ADC_CHIPS
     bi_decl(bi_1pin_with_name(PIO_RX1_PIN, "PIO0 data1 input pin"));
     bi_decl(bi_1pin_with_name(PIO_RX2_PIN, "PIO0 data2 input pin"));
     bi_decl(bi_1pin_with_name(PIO_RX3_PIN, "PIO0 data3 input pin"));
@@ -553,7 +532,6 @@ int main()
     bi_decl(bi_1pin_with_name(PIO_RX5_PIN, "PIO0 data5 input pin"));
     bi_decl(bi_1pin_with_name(PIO_RX6_PIN, "PIO0 data6 input pin"));
     bi_decl(bi_1pin_with_name(PIO_RX7_PIN, "PIO0 data7 input pin"));
-#   endif
 	//
 	// Flash LED twice at start up.
 	//
@@ -564,15 +542,10 @@ int main()
 	sampling_LED_ON(); sleep_ms(500);
 	sampling_LED_OFF();
 	//
-	// Start the PIO state machine to talk to the MCP3301 chips.
+	// Start the PIO state machine to talk to the BU79100G ADC chips.
 	//
-#   ifdef EIGHT_ADC_CHIPS
 	uint offset = pio_add_program(pio0, &bu79100g_eight_read_program);
 	bu79100g_eight_read_program_init(pio0, 0, offset);
-#   else
-	uint offset = pio_add_program(pio0, &bu79100g_one_read_program);
-	bu79100g_one_read_program_init(pio0, 0, offset);
-#   endif
 	//
 	// We output an event pin that gets buffered by the COMMS MCU
 	// and reflected onto the system event line.
