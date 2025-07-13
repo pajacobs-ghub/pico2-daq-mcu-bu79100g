@@ -101,7 +101,7 @@ static inline void sampling_LED_OFF()
 #define N_CHAN 8
 uint16_t res[N_CHAN];
 
-// A place to collect teh sample sets as they come in from the ADC chips.
+// A place to collect the sample sets as they come in from the ADC chips.
 #define N_FULLWORDS 0x00010000
 #define MAX_N_SAMPLES (N_FULLWORDS/4)
 uint32_t data[N_FULLWORDS];
