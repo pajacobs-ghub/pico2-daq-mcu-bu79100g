@@ -8,6 +8,7 @@
 //    2025-04-14: move PIO-RX pin so that we have room for 8 RX pins.
 //    2025-04-15: implement code for reading 8 MCP3301 chips.
 //    2025-07-07: Adapt to reading the BU79100G ADC chips.
+//    2025-10-04: Adapt to the manufactured-PCB pin assignments.
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -24,14 +25,17 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.10 2025-07-08 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.11 2025-10-04 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
-const uint READY_PIN = 22;
-const uint FLAG_PIN = 26;
-const uint Pico2_EVENT_PIN = 3;
+// A. For interaction with the PIC182Q71 COMMS-MCU.
+// UART0_TX on GP0 (default)
+// UART0_RX in GP1 (default)
 const uint SYSTEM_EVENTn_PIN = 2;
+const uint Pico2_EVENT_PIN = 3;
+const uint READY_PIN = 15;
+// B. For interaction with the BU79100G ADC chips.
 const uint PIO_CSn_PIN = 5;
 const uint PIO_CLK_PIN = 6;
 const uint PIO_RX0_PIN = 7;
@@ -42,6 +46,15 @@ const uint PIO_RX4_PIN = 11;
 const uint PIO_RX5_PIN = 12;
 const uint PIO_RX6_PIN = 13;
 const uint PIO_RX7_PIN = 14;
+// C. For implementing the Real-Time Data Port.
+const uint SPI0_CS_PIN = 17;
+const uint SPI0_SCK_PIN = 18;
+const uint SPI0_TX_PIN = 19;
+const uint RTDP_DE_PIN = 20;
+const uint RTDP_REn_PIN = 21;
+const uint DATA_RDY_PIN = 27;
+// D. For timing via a logic probe.
+const uint TIMING_FLAG_PIN = 26;
 
 static inline void assert_ready()
 {
@@ -65,12 +78,12 @@ static inline void release_event()
 
 static inline void raise_flag_pin()
 {
-	gpio_put(FLAG_PIN, 1);
+	gpio_put(TIMING_FLAG_PIN, 1);
 }
 
 static inline void lower_flag_pin()
 {
-	gpio_put(FLAG_PIN, 0);
+	gpio_put(TIMING_FLAG_PIN, 0);
 }
 
 static inline uint8_t read_system_event_pin()
@@ -197,7 +210,16 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
     uint64_t timeout = time_us_64() + period_us;
     //
+    // Main loop for sampling.
     //
+    // Note that when we are asking for a single set of samples,
+    // we the loop will actually take two sample sets because the
+    // event does not occur until after the first sample set and
+    // then the samples_remaining count will be reduced to zero
+    // in the following pass of the loop.
+    // This is actually handy for interacting with the BU79100G chips
+    // because the first conversion following chip-select going low
+    // is not valid.
     while (samples_remaining > 0) {
         sampling_LED_ON();
         raise_flag_pin(); // to allow timing via a logic probe.
@@ -476,7 +498,10 @@ void interpret_command(char* cmdStr)
     case 'I':
         // Immediately take a single sample set and report values.
         sample_channels_once();
-        printf("I %s\n", sample_set_to_str(0));
+        // Despite the name saying that the channels are sampled once,
+        // they are actually sampled twice and only the second set is
+        // valid.  We return that second sample set, at index 1.
+        printf("I %s\n", sample_set_to_str(1));
         break;
     case 'P':
         // Report the selected sample set for the configured channels.
@@ -518,7 +543,7 @@ int main()
 	//
     bi_decl(bi_program_description(VERSION_STR));
     bi_decl(bi_1pin_with_name(LED_PIN, "LED output pin"));
-    bi_decl(bi_1pin_with_name(FLAG_PIN, "Flag output pin for timing measurements"));
+    bi_decl(bi_1pin_with_name(TIMING_FLAG_PIN, "Flag output pin for timing measurements"));
     bi_decl(bi_1pin_with_name(READY_PIN, "Ready/Busy# output pin"));
     bi_decl(bi_1pin_with_name(Pico2_EVENT_PIN, "Pico2 EVENT output pin"));
     bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "Sense EVENT input pin"));
@@ -557,8 +582,8 @@ int main()
 	gpio_set_dir(SYSTEM_EVENTn_PIN, GPIO_IN);
 	release_event();
 	//
-    gpio_init(FLAG_PIN);
-    gpio_set_dir(FLAG_PIN, GPIO_OUT);
+    gpio_init(TIMING_FLAG_PIN);
+    gpio_set_dir(TIMING_FLAG_PIN, GPIO_OUT);
     lower_flag_pin();
     did_not_keep_up_during_sampling = 0;
     //
