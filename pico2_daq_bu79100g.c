@@ -392,7 +392,7 @@ void interpret_command(char* cmdStr)
 	case 'v':
 		// Report version string and (some) configuration details.
 		uint f_clk_sys = frequency_count_khz(CLOCKS_FC0_SRC_VALUE_CLK_SYS);
-		printf("v %s %dxBU79100 %d kHz ok\n", VERSION_STR, n_adc_chips, f_clk_sys);
+		printf("%s %dxBU79100 %d kHz ok\n", VERSION_STR, n_adc_chips, f_clk_sys);
 		break;
 	case 'L':
 		// Turn LED on or off.
@@ -405,15 +405,15 @@ void interpret_command(char* cmdStr)
 			i = (uint8_t) (atoi(token_ptr) & 1);
 			gpio_put(LED_PIN, i);
 			override_led = i;
-			printf("L %d ok\n", i);
+			printf("%d ok\n", i);
 		} else {
 			// There was no text to give a value.
-			printf("L fail: no value\n");
+			printf("fail: no value\n");
 		}
 		break;
 	case 'n':
 		// Report number of virtual registers.
-		printf("n %d ok\n", NUMREG);
+		printf("%d ok\n", NUMREG);
 		break;
     case 'r':
         // Report a selected register value.
@@ -423,12 +423,12 @@ void interpret_command(char* cmdStr)
             i = (uint8_t) atoi(token_ptr);
             if (i < NUMREG) {
                 v = vregister[i];
-                printf("r %d ok\n", v);
+                printf("%d ok\n", v);
             } else {
-                printf("r fail: invalid register.\n");
+                printf("fail: invalid register.\n");
             }
         } else {
-            printf("r fail: no register specified.\n");
+            printf("fail: no register specified.\n");
         }
         break;
     case 's':
@@ -445,32 +445,32 @@ void interpret_command(char* cmdStr)
                     if (i != 1) {
                         // Accept user-specified value.
                         vregister[i] = v;
-                        printf("s reg[%u] set to %d ok\n", i, v);
+                        printf("reg[%u] set to %d ok\n", i, v);
                     } else {
                         // Ignore user input.
-                        printf("s reg[%u] set to %d ok\n", i, N_CHAN);
+                        printf("reg[%u] set to %d ok\n", i, N_CHAN);
                     }
                 } else {
-                    printf("s fail: no value given.\n");
+                    printf("fail: no value given.\n");
                 }
             } else {
-                printf("s fail: invalid register.\n");
+                printf("fail: invalid register.\n");
             }
         } else {
-            printf("s fail: no register specified.\n");
+            printf("fail: no register specified.\n");
         }
         break;
     case 'F':
         // Set the values of the registers to those values hard-coded
         // into this firmware.  A factory default, so to speak.
         set_registers_to_original_values();
-        printf("F vregisters reset ok\n");
+        printf("vregisters reset ok\n");
         break;
     case 'g':
         // Start the sampling process.
         // What happens next, and when it happens, depends on the
         // register settings and external signals.
-        printf("g start sampling ok\n");
+        printf("start sampling ok\n");
         // The task takes an indefinite time,
         // so let the COMMS_MCU know via busy# pin.
         assert_not_ready();
@@ -479,7 +479,7 @@ void interpret_command(char* cmdStr)
         break;
     case 'k':
         // Report the value of the keeping-up flag.
-        printf("k %u ok\n", did_not_keep_up_during_sampling);
+        printf("%u ok\n", did_not_keep_up_during_sampling);
         break;
     case 'I':
         // Immediately take a single sample set and report values.
@@ -487,29 +487,29 @@ void interpret_command(char* cmdStr)
         // Despite the name saying that the channels are sampled once,
         // they are actually sampled twice and only the second set is
         // valid.  We return that second sample set, at index 1.
-        printf("I %s ok\n", sample_set_to_str(1));
+        printf("%s ok\n", sample_set_to_str(1));
         break;
     case 'P':
-        // Report the selected sample set for the configured channels.
+        // Report the selected sample set.
         // An index of 0 refers to the oldest sample set.
         token_ptr = strtok(&cmdStr[1], sep_tok);
         if (token_ptr) {
             // Found some nonblank text, assume sample index.
             uint32_t ii = (uint32_t) atol(token_ptr);
-            printf("P %s ok\n", sample_set_to_str(ii));
+            printf("%s ok\n", sample_set_to_str(ii));
         } else {
-            printf("P fail: no index given.\n");
+            printf("fail: no index given.\n");
         }
         break;
     case 'z':
         // Release the EVENT# line.
-        // Presumably this line has been help low following an internal
-        // trigger event during the sampling process.
+        // Presumably this line has been help low following
+        // a trigger event during the sampling process.
         release_eventn_line();
-        printf("z event line released ok\n");
+        printf("event line released ok\n");
         break;
 	default:
-		printf("%c fail: Unknown command\n", cmdStr[0]);
+		printf("fail: Unknown command %c\n", cmdStr[0]);
     }
     if (!override_led) gpio_put(LED_PIN, 0); // To indicate end of interpreter activity.
 } // end interpret_command()
