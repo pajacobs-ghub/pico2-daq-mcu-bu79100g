@@ -52,14 +52,16 @@ static inline void bu79100g_eight_read_program_init(PIO pio, uint sm, uint offse
 	//
 	// RX (BU79100G chips 0 through 7) input on GPIO7 through GPIO14
 	sm_config_set_in_pin_base(&c, 7);
-	pio_gpio_init(pio, 7); gpio_pull_down(7);
-	pio_gpio_init(pio, 8); gpio_pull_down(8);
-	pio_gpio_init(pio, 9); gpio_pull_down(9);
-	pio_gpio_init(pio, 10); gpio_pull_down(10);
-	pio_gpio_init(pio, 11); gpio_pull_down(11);
-	pio_gpio_init(pio, 12); gpio_pull_down(12);
-	pio_gpio_init(pio, 13); gpio_pull_down(13);
-	pio_gpio_init(pio, 14); gpio_pull_down(14);
+	// 2025-11-13 Change to enabling pull-up tather than pull-down
+	// on each data input, to avoid issue RP2350-E9. 
+	pio_gpio_init(pio, 7); gpio_pull_up(7);
+	pio_gpio_init(pio, 8); gpio_pull_up(8);
+	pio_gpio_init(pio, 9); gpio_pull_up(9);
+	pio_gpio_init(pio, 10); gpio_pull_up(10);
+	pio_gpio_init(pio, 11); gpio_pull_up(11);
+	pio_gpio_init(pio, 12); gpio_pull_up(12);
+	pio_gpio_init(pio, 13); gpio_pull_up(13);
+	pio_gpio_init(pio, 14); gpio_pull_up(14);
 	// SPI is synchronous, so bypass input synchroniser to reduce input delay.
     hw_set_bits(&pio->input_sync_bypass, 0xff << 7);
     pio_sm_set_consecutive_pindirs(pio, sm, 7, 8, false); // RX input

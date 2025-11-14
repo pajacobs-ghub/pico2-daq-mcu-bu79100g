@@ -9,6 +9,7 @@
 //    2025-04-15: implement code for reading 8 MCP3301 chips.
 //    2025-07-07: Adapt to reading the BU79100G ADC chips.
 //    2025-10-04: Adapt to the manufactured-PCB pin assignments.
+//    2025-10-04: Delegate internal-trigger duties to the PIC18 COMMS-MCU.
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -25,14 +26,14 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.12 2025-11-10 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.13 2025-11-14 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
-// A. For interaction with the PIC182Q71 COMMS-MCU.
+// A. For interaction with the PIC18F26Q71 COMMS-MCU.
 // UART0_TX on GP0 (default)
 // UART0_RX in GP1 (default)
-const uint SYSTEM_EVENTn_PIN = 2;
+const uint SYSTEM_EVENTn_PIN = 2; 
 const uint Pico2_EVENT_PIN = 3;
 const uint READY_PIN = 15;
 // B. For interaction with the BU79100G ADC chips.
@@ -66,14 +67,21 @@ static inline void assert_not_ready()
     gpio_put(READY_PIN, 0);
 }
 
-static inline void assert_event()
+static inline uint8_t read_system_eventn_line()
 {
-	gpio_put(Pico2_EVENT_PIN, 1);
+	return (uint8_t) gpio_get(SYSTEM_EVENTn_PIN);
 }
 
-static inline void release_event()
+static inline void assert_eventn()
 {
-	gpio_put(Pico2_EVENT_PIN, 0);
+	gpio_put(SYSTEM_EVENTn_PIN, 0);
+	gpio_set_dir(SYSTEM_EVENTn_PIN, GPIO_OUT);
+}
+
+static inline void release_eventn_line()
+{
+	gpio_set_dir(SYSTEM_EVENTn_PIN, GPIO_IN);
+	gpio_pull_up(SYSTEM_EVENTn_PIN);
 }
 
 static inline void raise_flag_pin()
@@ -84,11 +92,6 @@ static inline void raise_flag_pin()
 static inline void lower_flag_pin()
 {
 	gpio_put(TIMING_FLAG_PIN, 0);
-}
-
-static inline uint8_t read_system_event_pin()
-{
-	return (uint8_t) gpio_get(SYSTEM_EVENTn_PIN);
 }
 
 const uint LED_PIN = PICO_DEFAULT_LED_PIN;
@@ -128,7 +131,7 @@ uint8_t did_not_keep_up_during_sampling;
 // [FIX-ME] It may be better to store parameters as int32_t on the Pico2.
 // There seems to be no advantage to using 16 bits on a 32-bit MCU and
 // there will be fewer surprises with full 32-bit values.
-#define NUMREG 7
+#define NUMREG 4
 int16_t vregister[NUMREG]; // working copy in SRAM
 
 void set_registers_to_original_values()
@@ -138,10 +141,7 @@ void set_registers_to_original_values()
     vregister[0] = 10;     // sample period in microseconds (timer ticks)
     vregister[1] = N_CHAN; // number of channels to sample ia always 8.
     vregister[2] = 128;    // number of samples in record after trigger event
-    vregister[3] = 0;      // trigger mode 0=immediate, 1=internal, 2=external
-    vregister[4] = 0;      // trigger channel for internal trigger
-    vregister[5] = 100;    // trigger level as a signed integer
-    vregister[6] = 1;      // trigger slope 0=sample-below-level 1=sample-above-level
+    vregister[3] = 0;      // trigger mode 0=immediate, 1=wait for EVENTn
 }
 
 static inline uint32_t oldest_fullword_index_in_data()
@@ -184,7 +184,7 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
 // So long as the record does not wrap around, the oldest sample set will start at
 // byte address 0.
 //
-// For mode=1 or 2, we will start sampling into the SRAM circular buffer
+// For mode=1, we will start sampling into the SRAM circular buffer
 // for an indefinite number of samples, while waiting for the trigger event.
 // Once the trigger event happens, we will continue the record for a specified
 // number of samples.  Because we do not keep a record of the number of times
@@ -196,13 +196,9 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     uint16_t period_us = (uint16_t)vregister[0];
     uint8_t mode = (uint8_t)vregister[3];
 # define TRIGGER_IMMEDIATE 0
-# define TRIGGER_INTERNAL 1
-# define TRIGGER_EXTERNAL 2
-    uint8_t trigger_chan = (uint8_t)vregister[4];
-    uint16_t trigger_level = (uint16_t) vregister[5];
-    uint8_t trigger_slope = (uint8_t)vregister[6];
+# define TRIGGER_ON_EVENTn 1
     //
-    release_event();
+    release_eventn_line();
     next_fullword_index_in_data = 0; // Start afresh, at index 0.
     fullword_index_has_wrapped_around = 0;
     uint8_t post_event = 0;
@@ -240,28 +236,18 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
             samples_remaining--;
         } else {
             // We need to decide about trigger event.
-            switch (mode) {
-            case TRIGGER_IMMEDIATE:
+            if (mode == TRIGGER_IMMEDIATE) {
                 post_event = 1;
-                assert_event();
-                break;
-            case TRIGGER_INTERNAL: {
-                // Will only have time to do this if we are sampling slowly enough.
-                uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
-                unpack_sample_set(here, values);
-                uint16_t s = res[trigger_chan];
-                if ((trigger_slope == 1 && s >= trigger_level) ||
-                    (trigger_slope == 0 && s <= trigger_level)) {
+                assert_eventn();
+            } else {
+				// Waiting for EVENTn.
+                if (read_system_eventn_line() == 0) {
                     post_event = 1;
-                    assert_event();
+                    // We also assert the EVENTn signal low,
+                    // to show that we have seen it.
+                    assert_eventn();
                 }
-                }
-                break;
-            case TRIGGER_EXTERNAL:
-                if (read_system_event_pin() == 0) {
-                    post_event = 1;
-                }
-            } // end switch
+            }
         }
         // Point to the next available fullword index.
         next_fullword_index_in_data += 4;
@@ -519,7 +505,7 @@ void interpret_command(char* cmdStr)
         // Release the EVENT# line.
         // Presumably this line has been help low following an internal
         // trigger event during the sampling process.
-        release_event();
+        release_eventn_line();
         printf("z event line released ok\n");
         break;
 	default:
@@ -546,7 +532,7 @@ int main()
     bi_decl(bi_1pin_with_name(TIMING_FLAG_PIN, "Flag output pin for timing measurements"));
     bi_decl(bi_1pin_with_name(READY_PIN, "Ready/Busy# output pin"));
     bi_decl(bi_1pin_with_name(Pico2_EVENT_PIN, "Pico2 EVENT output pin"));
-    bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "Sense EVENT input pin"));
+    bi_decl(bi_1pin_with_name(SYSTEM_EVENTn_PIN, "System EVENTn input/output pin"));
     bi_decl(bi_1pin_with_name(PIO_CSn_PIN, "PIO0 chip select pin"));
     bi_decl(bi_1pin_with_name(PIO_CLK_PIN, "PIO0 clock output pin"));
     bi_decl(bi_1pin_with_name(PIO_RX0_PIN, "PIO0 data0 input pin"));
@@ -572,20 +558,21 @@ int main()
 	uint offset = pio_add_program(pio0, &bu79100g_eight_read_program);
 	bu79100g_eight_read_program_init(pio0, 0, offset);
 	//
-	// We output an event pin that gets buffered by the COMMS MCU
-	// and reflected onto the system event line.
-	// We sense that system event line, also.
+	// No longer using Pico2_EVENT_PIN.
+	// gpio_init(Pico2_EVENT_PIN);
+	// gpio_set_dir(Pico2_EVENT_PIN, GPIO_OUT);
+    // gpio_disable_pulls(Pico2_EVENT_PIN);
 	//
-	gpio_init(Pico2_EVENT_PIN);
-	gpio_set_dir(Pico2_EVENT_PIN, GPIO_OUT);
-    gpio_disable_pulls(Pico2_EVENT_PIN);
+	// We initially sense the system EVENTn line.
+	// Later, we may/will assert a low signal on it.
 	gpio_init(SYSTEM_EVENTn_PIN);
 	gpio_set_dir(SYSTEM_EVENTn_PIN, GPIO_IN);
-    gpio_disable_pulls(SYSTEM_EVENTn_PIN);
-	release_event();
+    gpio_pull_up(SYSTEM_EVENTn_PIN);
+	release_eventn_line(); // redundant
 	//
     gpio_init(TIMING_FLAG_PIN);
     gpio_set_dir(TIMING_FLAG_PIN, GPIO_OUT);
+    gpio_disable_pulls(TIMING_FLAG_PIN);
     lower_flag_pin();
     did_not_keep_up_during_sampling = 0;
     //
@@ -593,6 +580,7 @@ int main()
 	//
     gpio_init(READY_PIN);
     gpio_set_dir(READY_PIN, GPIO_OUT);
+    gpio_disable_pulls(READY_PIN);
 	assert_ready();
     //
 	// Enter the command loop.
