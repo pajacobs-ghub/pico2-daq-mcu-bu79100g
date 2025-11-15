@@ -4,7 +4,7 @@
 ; Hints taken from the C/C++ SDK and
 ; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
 ;
-; Peter J. 2025-07-08
+; Peter J. 2025-07-08, 2025-11-16
 
 .program bu79100g_eight_read
 ; Pin assignments for eight BU79100G ADC chips.
@@ -21,8 +21,14 @@
 .pio_version RP2350
 .fifo txrx
 ; sysclk at 150MHz (6.667ns period)
-; Want the PIO instruction cycle to be 30ns
-.clock_div 4.5
+; Want the PIO instruction cycle to be 30ns for strip-board build
+; but can reduce sysclk period to 13.33ns with PCB build.
+; clock_div  sysclk-ns  SPI-CLK-MHz
+; 4.5        30.0       8.333
+; 3.0        20.0
+; 2.0        13.33      18.75
+; 1.0        6.667
+.clock_div 2.0
 .in 8 left auto
 .side_set 2
 
@@ -41,7 +47,8 @@ public entry_point:
     ; We don't actually use that word as data but as a release.
 	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
 	; We count the bits down, from 15 to 0.
-	set x, 15       side 0x0 [1]  ; take CSn low, keep CLK low and start to collect bits
+	set x, 15       side 0x0 [2]  ; take CSn low, pause before collecting bits
+	; wrap to start collecting bits
 .wrap
 
 
