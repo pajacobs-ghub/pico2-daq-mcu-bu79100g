@@ -339,7 +339,8 @@ char* mem_dump_to_str(uint32_t addr)
         snprintf(str_buf2, NSTRBUF2, "%02x%02x", high_byte, low_byte);
         strncat(str_buf1, str_buf2, NSTRBUF2);
     }
-    word_index += 1;
+    for (uint8_t ch=0; ch < N_CHAN; ch++) values[ch] = 0;
+    word_index += 4;
     unpack_sample_set(&(data[word_index]), values);
     for (uint8_t ch=0; ch < N_CHAN; ch++) {
         high_byte = (uint8_t) ((values[ch] & 0xff00) >> 8);
