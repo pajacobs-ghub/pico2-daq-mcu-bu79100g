@@ -9,7 +9,8 @@
 //    2025-04-15: implement code for reading 8 MCP3301 chips.
 //    2025-07-07: Adapt to reading the BU79100G ADC chips.
 //    2025-10-04: Adapt to the manufactured-PCB pin assignments.
-//    2025-10-04: Delegate internal-trigger duties to the PIC18 COMMS-MCU.
+//    2025-11-14: Delegate internal-trigger duties to the PIC18 COMMS-MCU.
+//    2025-11-15: Add commands to enable reporting of a full recording.
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -26,7 +27,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.13 2025-11-14 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.14 2025-11-15 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -112,6 +113,7 @@ static inline void sampling_LED_OFF()
 // are going to use uint16_t (a.k.a. half-words) as the sample type.
 // Sample sets are going to be captured as sets of four uint32_t words,
 // that may be decoded into 8 uint16_t half-words.
+uint pio_offset_for_slow_program = 0;
 
 // A place for the current samples.
 #define N_CHAN 8
@@ -206,6 +208,13 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
     uint64_t timeout = time_us_64() + period_us;
     //
+    // Initialize the relevant PIO program.
+    //
+    // Presently, we have only one PIO program,
+    // but we expect to introduce a fast variant
+    // to drive the ADC chips at full-speed.
+    bu79100g_eight_read_program_init(pio0, 0, pio_offset_for_slow_program);
+    //
     // Main loop for sampling.
     //
     // Note that when we are asking for a single set of samples,
@@ -266,6 +275,10 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
 		}
 		timeout += period_us;
     } // end while
+    //
+    // Note that we leave the bits in their packed arrangement,
+    // just as they were collected from the PIO.
+    // 
 } // end void sample_channels()
 
 void sample_channels_once()
@@ -308,6 +321,34 @@ char* sample_set_to_str(uint32_t n)
     return str_buf1;
 }
 
+char* mem_dump_to_str(uint32_t addr)
+// Write a 32-byte page of sample data into the buffer as hex digits
+// representing the 16-bit converted samples. Use big-endian format.
+// Finally, return a pointer to the buffer.
+{
+    uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
+    // Assume that the byte address is correctly aligned.
+	uint32_t word_index = addr / 4;
+    unpack_sample_set(&(data[word_index]), values);
+    uint8_t high_byte = (uint8_t) ((values[0] & 0xff00) >> 8);
+    uint8_t low_byte = (uint8_t) (values[0] & 0x00ff);
+    snprintf(str_buf1, NSTRBUF1, "%02x%02x", high_byte, low_byte);
+    for (uint8_t ch=1; ch < N_CHAN; ch++) {
+        high_byte = (uint8_t) ((values[ch] & 0xff00) >> 8);
+        low_byte = (uint8_t) (values[ch] & 0x00ff);
+        snprintf(str_buf2, NSTRBUF2, "%02x%02x", high_byte, low_byte);
+        strncat(str_buf1, str_buf2, NSTRBUF2);
+    }
+    word_index += 1;
+    unpack_sample_set(&(data[word_index]), values);
+    for (uint8_t ch=0; ch < N_CHAN; ch++) {
+        high_byte = (uint8_t) ((values[ch] & 0xff00) >> 8);
+        low_byte = (uint8_t) (values[ch] & 0x00ff);
+        snprintf(str_buf2, NSTRBUF2, "%02x%02x", high_byte, low_byte);
+        strncat(str_buf1, str_buf2, NSTRBUF2);
+    }
+	return str_buf1;
+}
 
 // For incoming serial comms
 #define NBUFA 80
@@ -443,12 +484,12 @@ void interpret_command(char* cmdStr)
                     // Assume text is value for register.
                     v = (int16_t) atoi(token_ptr);
                     if (i != 1) {
-                        // Accept user-specified value.
+                        // Accept user-specified value for most registers.
                         vregister[i] = v;
-                        printf("reg[%u] set to %d ok\n", i, v);
+                        printf("reg[%u] %d ok\n", i, v);
                     } else {
-                        // Ignore user input.
-                        printf("reg[%u] set to %d ok\n", i, N_CHAN);
+                        // Ignore user input for the number of channels.
+                        printf("reg[%u] %d ok\n", i, N_CHAN);
                     }
                 } else {
                     printf("fail: no value given.\n");
@@ -465,6 +506,40 @@ void interpret_command(char* cmdStr)
         // into this firmware.  A factory default, so to speak.
         set_registers_to_original_values();
         printf("vregisters reset ok\n");
+        break;
+    case 'b':
+        // Byte size of sample set.
+        printf("%d ok\n", N_CHAN*2);
+        break;
+    case 'm':
+        // Maximum number of sample sets that can be stored.
+        printf("%d ok\n", MAX_N_SAMPLES);
+        break;
+    case 'T':
+        // Total bytes assigned to sample storage.
+        printf("%d ok\n", N_FULLWORDS*4);
+        break;
+    case 'a':
+        // Byte index (within sample data storage) of the oldest sample. 
+        printf("%d ok\n", ((fullword_index_has_wrapped_around) ? 
+                           next_fullword_index_in_data*4 : 0));
+        break;
+    case 'N':
+        // Size of data storage in 32-byte pages.
+        printf("%d ok\n", N_FULLWORDS/8);
+        break;
+    case 'M':
+        // Page of bytes (in big-endian format) representing
+        // two sample sets, each with 8x16-bit values.
+        // Start at the specified byte-index within the stored data.
+        token_ptr = strtok(&cmdStr[1], sep_tok);
+        if (token_ptr) {
+            // Found some nonblank text, assume byte-index.
+            uint32_t addr = (uint32_t) atoi(token_ptr);
+            printf("%s ok\n", mem_dump_to_str(addr));
+        } else {
+            printf("fail: no byte-index specified.\n");
+        }
         break;
     case 'g':
         // Start the sampling process.
@@ -553,10 +628,8 @@ int main()
 	sampling_LED_ON(); sleep_ms(500);
 	sampling_LED_OFF();
 	//
-	// Start the PIO state machine to talk to the BU79100G ADC chips.
-	//
-	uint offset = pio_add_program(pio0, &bu79100g_eight_read_program);
-	bu79100g_eight_read_program_init(pio0, 0, offset);
+	// Establish the PIO state machine program(s) to talk to the BU79100G ADC chips.
+	pio_offset_for_slow_program = pio_add_program(pio0, &bu79100g_eight_read_program);
 	//
 	// No longer using Pico2_EVENT_PIN.
 	// gpio_init(Pico2_EVENT_PIN);
