@@ -40,8 +40,16 @@ bitloop:
 	; If we fall-through to here, all bits are now shifted in
 	; so we push them into the RX FIFO.
 	push iffull     side 0x0      ; keep CLK low
-	nop             side 0x1      ; take CSn high to allow ADC track mode to continue
-
+	nop             side 0x1 [5]  ; take CSn high to allow ADC track mode to continue
+    ; If we get the CPU to write another word to TX FIFo as soon as it can,
+    ; we may achieve close to 1MSps recording.
+    ; A 7 cycle pause on the nop line above gives us 1040ns sample period,
+    ; as measured on the oscilloscope.
+    ; A 5 cycle pause gives 1014ns, including the overhead of the main loop
+    ; and getting data out and stored into SRAM.
+    ; A 4 cycle pause did not decrease the period further,
+    ; possibly because the main-loop overhead was the limiting factor.
+    
 public entry_point:
     ; We block here until the CPU writes a word to the TX FIFO.
     ; We don't actually use that word as data but as a release.

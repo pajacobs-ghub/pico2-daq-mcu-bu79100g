@@ -11,6 +11,7 @@
 //    2025-10-04: Adapt to the manufactured-PCB pin assignments.
 //    2025-11-14: Delegate internal-trigger duties to the PIC18 COMMS-MCU.
 //    2025-11-15: Add commands to enable reporting of a full recording.
+//    2025-11-16: 1MSps achieved.
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -27,7 +28,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.14 2025-11-15 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.15 2025-11-16 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -113,7 +114,7 @@ static inline void sampling_LED_OFF()
 // are going to use uint16_t (a.k.a. half-words) as the sample type.
 // Sample sets are going to be captured as sets of four uint32_t words,
 // that may be decoded into 8 uint16_t half-words.
-uint pio_offset_for_slow_program = 0;
+uint pio_offset_for_8_read_program = 0;
 
 // A place for the current samples.
 #define N_CHAN 8
@@ -205,15 +206,9 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     fullword_index_has_wrapped_around = 0;
     uint8_t post_event = 0;
     uint16_t samples_remaining = (uint16_t)vregister[2];
-    did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
-    uint64_t timeout = time_us_64() + period_us;
-    //
-    // Initialize the relevant PIO program.
-    //
-    // Presently, we have only one PIO program,
-    // but we expect to introduce a fast variant
-    // to drive the ADC chips at full-speed.
-    bu79100g_eight_read_program_init(pio0, 0, pio_offset_for_slow_program);
+    // Start up the PIO program that happens to block 
+    // until a word is put into its TX FIFO
+    bu79100g_eight_read_program_init(pio0, 0, pio_offset_for_8_read_program);
     //
     // Main loop for sampling.
     //
@@ -225,56 +220,110 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     // This is actually handy for interacting with the BU79100G chips
     // because the first conversion following chip-select going low
     // is not valid.
-    while (samples_remaining > 0) {
+    //
+    // There are two variants of the main loop, one as fast as we can,
+    // and the other paced by the system timer.
+    //
+    did_not_keep_up_during_sampling = 0; // Presume that we will be fast enough.
+    if (period_us < 2) {
+		// Run the sampling process as fast as the PIO will allow.
+		// This should give us about 1MSps.
         sampling_LED_ON();
-        raise_flag_pin(); // to allow timing via a logic probe.
-        //
-        // Take the analog sample set.
-        // Read all 8 ADC chips via the PIO.
-        // Each of four 32-bit words coming from the PIO's RX FIFO
-        // will hold one 4-bit nybble for each of eight ADC bit streams.
-		pio_sm_put_blocking(pio0, 0, 1);
-        uint32_t* here = &data[next_fullword_index_in_data];
-        *here = pio_sm_get_blocking(pio0, 0);
-		*(here+1) = pio_sm_get_blocking(pio0, 0);
-		*(here+2) = pio_sm_get_blocking(pio0, 0);
-		*(here+3) = pio_sm_get_blocking(pio0, 0);
-        //
-        if (post_event) {
-            // Trigger event has happened.
-            samples_remaining--;
-        } else {
-            // We need to decide about trigger event.
-            if (mode == TRIGGER_IMMEDIATE) {
-                post_event = 1;
-                assert_eventn();
+        while (samples_remaining > 0) {
+            // Begin taking the analog sample set via the PIO.
+		    pio_sm_put_blocking(pio0, 0, 1);
+            uint32_t* here = &data[next_fullword_index_in_data];
+            // While the PIO starts sampling process and begins
+            // getting data from the BU79100G chips,
+            // check the state of the EVENTn line for a trigger.
+            if (post_event) {
+                // Trigger event has happened.
+                samples_remaining--;
             } else {
-				// Waiting for EVENTn.
-                if (read_system_eventn_line() == 0) {
+                // We need to decide about trigger event.
+                if (mode == TRIGGER_IMMEDIATE) {
                     post_event = 1;
-                    // We also assert the EVENTn signal low,
-                    // to show that we have seen it.
                     assert_eventn();
+                } else {
+				    // Waiting for EVENTn.
+                    if (read_system_eventn_line() == 0) {
+                        post_event = 1;
+                        // We also assert the EVENTn signal low,
+                        // to show that we have seen it.
+                        assert_eventn();
+                    }
                 }
             }
-        }
-        // Point to the next available fullword index.
-        next_fullword_index_in_data += 4;
-        if (next_fullword_index_in_data >= N_FULLWORDS) {
-            next_fullword_index_in_data -= N_FULLWORDS;
-            fullword_index_has_wrapped_around = 1;
-        }
-        lower_flag_pin();
+            // Read all 8 ADC chips via the PIO.
+            // Each of four 32-bit words coming from the PIO's RX FIFO
+            // will hold one 4-bit nybble for each of eight ADC bit streams.
+            *here = pio_sm_get_blocking(pio0, 0);
+		    *(here+1) = pio_sm_get_blocking(pio0, 0);
+		    *(here+2) = pio_sm_get_blocking(pio0, 0);
+		    *(here+3) = pio_sm_get_blocking(pio0, 0);
+            // Point to the next available fullword index.
+            next_fullword_index_in_data += 4;
+            if (next_fullword_index_in_data >= N_FULLWORDS) {
+                next_fullword_index_in_data -= N_FULLWORDS;
+                fullword_index_has_wrapped_around = 1;
+            }
+        } // end while
         sampling_LED_OFF();
-        bool late_flag = time_reached(timeout);
-        // If we arrive late for the timer, for even one sample set, set the global flag.
-        if (late_flag) {
-			did_not_keep_up_during_sampling = 1;
-		} else {
-			busy_wait_until(timeout);
-		}
-		timeout += period_us;
-    } // end while
+	} else {
+		// For sample periods greater than 1microsecond,
+		// the loop is paced by the system clock.
+        uint64_t timeout = time_us_64() + period_us;
+        while (samples_remaining > 0) {
+            sampling_LED_ON();
+            raise_flag_pin(); // to allow timing via a logic probe.
+            //
+            // Take the analog sample set.
+            // Read all 8 ADC chips via the PIO.
+            // Each of four 32-bit words coming from the PIO's RX FIFO
+            // will hold one 4-bit nybble for each of eight ADC bit streams.
+		    pio_sm_put_blocking(pio0, 0, 1);
+            uint32_t* here = &data[next_fullword_index_in_data];
+            *here = pio_sm_get_blocking(pio0, 0);
+		    *(here+1) = pio_sm_get_blocking(pio0, 0);
+		    *(here+2) = pio_sm_get_blocking(pio0, 0);
+		    *(here+3) = pio_sm_get_blocking(pio0, 0);
+            //
+            if (post_event) {
+                // Trigger event has happened.
+                samples_remaining--;
+            } else {
+                // We need to decide about trigger event.
+                if (mode == TRIGGER_IMMEDIATE) {
+                    post_event = 1;
+                    assert_eventn();
+                } else {
+				    // Waiting for EVENTn.
+                    if (read_system_eventn_line() == 0) {
+                        post_event = 1;
+                        // We also assert the EVENTn signal low,
+                        // to show that we have seen it.
+                        assert_eventn();
+                    }
+                }
+            }
+            // Point to the next available fullword index.
+            next_fullword_index_in_data += 4;
+            if (next_fullword_index_in_data >= N_FULLWORDS) {
+                next_fullword_index_in_data -= N_FULLWORDS;
+                fullword_index_has_wrapped_around = 1;
+            }
+            lower_flag_pin();
+            sampling_LED_OFF();
+            bool late_flag = time_reached(timeout);
+            // If we arrive late for the timer, for even one sample set, set the global flag.
+            if (late_flag) {
+			    did_not_keep_up_during_sampling = 1;
+		    } else {
+			    busy_wait_until(timeout);
+		    }
+		    timeout += period_us;
+        } // end while
+	}
     //
     // Note that we leave the bits in their packed arrangement,
     // just as they were collected from the PIO.
@@ -630,7 +679,7 @@ int main()
 	sampling_LED_OFF();
 	//
 	// Establish the PIO state machine program(s) to talk to the BU79100G ADC chips.
-	pio_offset_for_slow_program = pio_add_program(pio0, &bu79100g_eight_read_program);
+	pio_offset_for_8_read_program = pio_add_program(pio0, &bu79100g_eight_read_program);
 	//
 	// No longer using Pico2_EVENT_PIN.
 	// gpio_init(Pico2_EVENT_PIN);
