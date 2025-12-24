@@ -5,6 +5,7 @@
 ; https://github.com/raspberrypi/pico-examples/blob/master/pio/spi/spi.pio
 ;
 ; Peter J. 2025-07-08, 2025-11-16
+;          2025-12-24 change to starting with CLK high, as per datasheet suggestion.
 
 .program bu79100g_eight_read
 ; Pin assignments for eight BU79100G ADC chips.
@@ -34,14 +35,16 @@
 
 .wrap_target
 bitloop:
-	in pins, 8      side 0x2 [1]  ; read RX pins, set CLK high
-	jmp x-- bitloop side 0x0 [1]  ; take CLK low as we go around for the next bit.
+    nop             side 0x0 [1]  ; take CLK low to get bit out of BU79100G
+	in pins, 8      side 0x2 [0]  ; read RX pins, set CLK high
+	jmp x-- bitloop side 0x2 [0]  ; keep CLK high as we go around for the next bit.
 
 	; If we fall-through to here, all bits are now shifted in
 	; so we push them into the RX FIFO.
-	push iffull     side 0x0      ; keep CLK low
-	nop             side 0x1 [5]  ; take CSn high to allow ADC track mode to continue
-    ; If we get the CPU to write another word to TX FIFo as soon as it can,
+	push iffull     side 0x2      ; keep CLK high
+	nop             side 0x3 [5]  ; take CSn high to allow ADC track mode to continue
+    ; The following measurements taken on 2025-11-16 and may need an update.
+    ; If we get the CPU to write another word to TX FIFO as soon as it can,
     ; we may achieve close to 1MSps recording.
     ; A 7 cycle pause on the nop line above gives us 1040ns sample period,
     ; as measured on the oscilloscope.
@@ -49,13 +52,13 @@ bitloop:
     ; and getting data out and stored into SRAM.
     ; A 4 cycle pause did not decrease the period further,
     ; possibly because the main-loop overhead was the limiting factor.
-    
+
 public entry_point:
     ; We block here until the CPU writes a word to the TX FIFO.
     ; We don't actually use that word as data but as a release.
-	pull block      side 0x1 [1]  ; Block with CSn high and CLK low
+	pull block      side 0x3 [1]  ; Block with CLK high and CSn high
 	; We count the bits down, from 15 to 0.
-	set x, 15       side 0x0 [2]  ; take CSn low, pause before collecting bits
+	set x, 15       side 0x2 [2]  ; keep CLK high, take CSn low, pause
 	; wrap to start collecting bits
 .wrap
 
@@ -68,7 +71,7 @@ static inline void bu79100g_eight_read_program_init(PIO pio, uint sm, uint offse
 	// RX (BU79100G chips 0 through 7) input on GPIO7 through GPIO14
 	sm_config_set_in_pin_base(&c, 7);
 	// 2025-11-13 Change to enabling pull-up tather than pull-down
-	// on each data input, to avoid issue RP2350-E9. 
+	// on each data input, to avoid issue RP2350-E9.
 	pio_gpio_init(pio, 7); gpio_pull_up(7);
 	pio_gpio_init(pio, 8); gpio_pull_up(8);
 	pio_gpio_init(pio, 9); gpio_pull_up(9);

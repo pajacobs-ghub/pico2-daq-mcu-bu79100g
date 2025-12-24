@@ -12,6 +12,7 @@
 //    2025-11-14: Delegate internal-trigger duties to the PIC18 COMMS-MCU.
 //    2025-11-15: Add commands to enable reporting of a full recording.
 //    2025-11-16: 1MSps achieved.
+//    2025-12-24: Start with CLK high when getting bits from the BU79100G
 //
 #include "pico/stdlib.h"
 #include "hardware/clocks.h"
@@ -28,14 +29,14 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.15 2025-11-16 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.16 2025-12-24 Pico2 as DAQ-MCU"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
 // A. For interaction with the PIC18F26Q71 COMMS-MCU.
 // UART0_TX on GP0 (default)
 // UART0_RX in GP1 (default)
-const uint SYSTEM_EVENTn_PIN = 2; 
+const uint SYSTEM_EVENTn_PIN = 2;
 const uint Pico2_EVENT_PIN = 3;
 const uint READY_PIN = 15;
 // B. For interaction with the BU79100G ADC chips.
@@ -206,7 +207,7 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     fullword_index_has_wrapped_around = 0;
     uint8_t post_event = 0;
     uint16_t samples_remaining = (uint16_t)vregister[2];
-    // Start up the PIO program that happens to block 
+    // Start up the PIO program that happens to block
     // until a word is put into its TX FIFO
     bu79100g_eight_read_program_init(pio0, 0, pio_offset_for_8_read_program);
     //
@@ -327,7 +328,7 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     //
     // Note that we leave the bits in their packed arrangement,
     // just as they were collected from the PIO.
-    // 
+    //
 } // end void sample_channels()
 
 void sample_channels_once()
