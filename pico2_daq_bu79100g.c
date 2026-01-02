@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.17 2026-01-02 Pico2 as DAQ-MCU"
+#define VERSION_STR "v0.18 Pico2 as DAQ-MCU 2026-01-02"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -218,7 +218,7 @@ void __no_inline_not_in_flash_func(unpack_sample_set)(uint32_t* here, uint16_t v
 // sent from core0 via the queue.
 //
 queue_t RTDP_command_fifo;
-#define FIFO_LENGTH 1
+#define RTDP_FIFO_LENGTH 1
 // The commands themselves are uint values.
 #define RTDP_NOP 0
 #define RTDP_STOP 99
@@ -233,7 +233,6 @@ static uint32_t RTDP_data_words[N_CHAN/2];
 
 void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
 {
-    RTDP_status = RTDP_IDLE;
     // We will send out the data from this buffer.
     uint8_t byte_buffer[N_CHAN*2];
     const uint dma_spi0_tx = dma_claim_unused_channel(true);
@@ -249,13 +248,16 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
     // available data only when core0 has put some new data into RTP_data_words,
     // and core0 will only put new data in that array while core1 is active and idle.
     //
-    bool active = true;
+    RTDP_status = RTDP_IDLE;
     bool my_spi_is_not_initialized = true;
+    bool active = true;
     while (active) {
+        // Wait until we are commanded to do something.
         uint cmd = RTDP_NOP;
-        if (queue_try_remove(&RTDP_command_fifo, &cmd)) {
-            switch (cmd) {
-            case RTDP_ADVERTISE_NEW_DATA:
+        queue_remove_blocking(&RTDP_command_fifo, &cmd);
+        switch (cmd) {
+        case RTDP_ADVERTISE_NEW_DATA:
+            { // start new scope
                 RTDP_status = RTDP_BUSY;
                 uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
                 unpack_sample_set(RTDP_data_words, values);
@@ -300,21 +302,19 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 }
                 clear_data_ready();
                 RTDP_status = RTDP_IDLE;
-                break;
-            case RTDP_STOP:
-                spi_deinit(spi0);
-                dma_channel_cleanup(dma_spi0_tx);
-                my_spi_is_not_initialized = true;
-                clear_data_ready();
-                RTDP_status = RTDP_IDLE;
-                active = false;
-                break;
-            default:
-                {} // do nothing for any other command value
-            }
-        } else {
-            tight_loop_contents();
-        } // end if
+            } // end new scope
+            break;
+        case RTDP_STOP:
+            spi_deinit(spi0);
+            dma_channel_cleanup(dma_spi0_tx);
+            my_spi_is_not_initialized = true;
+            clear_data_ready();
+            RTDP_status = RTDP_IDLE;
+            active = false;
+            break;
+        default:
+            {} // do nothing for any other command value
+        }
     } // end while
     dma_channel_unclaim(dma_spi0_tx);
 } // end void core1_service_RTDP()
@@ -347,7 +347,7 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
     bool service_RTDP = (vregister[4] != 0) && (period_us >= 2);
     uint cmd = RTDP_STOP;
     if (service_RTDP) {
-        queue_init(&RTDP_command_fifo, sizeof(uint), FIFO_LENGTH);
+        queue_init(&RTDP_command_fifo, sizeof(uint), RTDP_FIFO_LENGTH);
     }
     //
     release_eventn_line();
@@ -445,14 +445,14 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
 		    *(here+3) = pio_sm_get_blocking(pio0, 0);
             //
             if (service_RTDP
-                && (queue_get_level(&RTDP_command_fifo) == 0)
+                && (queue_is_empty(&RTDP_command_fifo))
                 && RTDP_status == RTDP_IDLE) {
                 RTDP_data_words[0] = *here;
                 RTDP_data_words[1] = *(here+1);
                 RTDP_data_words[2] = *(here+2);
                 RTDP_data_words[3] = *(here+3);
                 cmd = RTDP_ADVERTISE_NEW_DATA;
-                queue_try_add(&RTDP_command_fifo, &cmd);
+                queue_add_blocking(&RTDP_command_fifo, &cmd);
             }
             //
             if (post_event) {
@@ -492,12 +492,16 @@ void __no_inline_not_in_flash_func(sample_channels)(void)
         } // end while (main sampling loop, slow variant)
         //
         if (service_RTDP) {
-            while (RTDP_status != RTDP_IDLE) {
-                // We wait for the last RTDP transfer to finish.
+            while (queue_is_full(&RTDP_command_fifo)) {
                 tight_loop_contents();
             }
             cmd = RTDP_STOP;
-            queue_try_add(&RTDP_command_fifo, &cmd);
+            queue_add_blocking(&RTDP_command_fifo, &cmd);
+            while ((queue_is_full(&RTDP_command_fifo))
+                   || (RTDP_status == RTDP_BUSY)) {
+                // We wait for the last RTDP command to finish.
+                tight_loop_contents();
+            }
             queue_free(&RTDP_command_fifo);
             multicore_reset_core1();
         }
