@@ -29,9 +29,12 @@ target_sources(pico2_daq_bu79100g PRIVATE pico2_daq_bu79100g.c)
 # pull in common dependencies
 target_link_libraries(pico2_daq_bu79100g PRIVATE
 	pico_stdlib
+    pico_multicore
+    pico_util
 	hardware_pio
 	hardware_timer
 	hardware_spi
+    hardware_dma
 	)
 
 # enable uart0
