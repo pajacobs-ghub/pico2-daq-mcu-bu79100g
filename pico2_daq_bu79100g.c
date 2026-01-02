@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.18 Pico2 as DAQ-MCU 2026-01-02"
+#define VERSION_STR "v0.19 Pico2 as DAQ-MCU 2026-01-03"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -289,17 +289,30 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 // by selecting the Pico2 as a slave SPI device and clocking out
                 // all of the bytes.
                 uint64_t timeout = time_us_64() + timeout_period_us;
-                while (dma_channel_is_busy(dma_spi0_tx)) {
-                    if (time_reached(timeout)) {
-                        // We presume that the SPI-master device is not present
-                        // or not paying attention to the DATA_RDY signal,
-                        // so we cancel the data transfer.
-                        spi_deinit(spi0);
-                        dma_channel_cleanup(dma_spi0_tx);
-                        my_spi_is_not_initialized = true;
-                        break;
-                    }
+                // Wait for selection by the SPI-master device.
+                // If this does not happen within a reasonable time,
+                // we presume that the SPI-master device is not present
+                // or not paying attention to the DATA_RDY signal,
+                // so we cancel the data transfer.
+                while (gpio_get(SPI0_CSn_PIN)) {
+                    if (time_reached(timeout)) { goto timed_out; }
                 }
+                enable_RTDP_transceiver();
+                // Wait for the data to be clocked out.
+                while (dma_channel_is_busy(dma_spi0_tx)) {
+                    if (time_reached(timeout)) { goto timed_out; }
+                }
+                // Wait for deselection by the SPI-master device.
+                while (!gpio_get(SPI0_CSn_PIN)) {
+                    if (time_reached(timeout)) { goto timed_out; }
+                }
+                goto finish;
+            timed_out:
+                spi_deinit(spi0);
+                dma_channel_cleanup(dma_spi0_tx);
+                my_spi_is_not_initialized = true;
+            finish:
+                disable_RTDP_transceiver();
                 clear_data_ready();
                 RTDP_status = RTDP_IDLE;
             } // end new scope
