@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.19 Pico2 as DAQ-MCU 2026-01-03"
+#define VERSION_STR "v0.20 Pico2 as DAQ-MCU 2026-01-03"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -271,6 +271,7 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                     // because it may have been deinitialized by a timeout event,
                     // or this may be the first use.
                     spi_init(spi0, 4000*1000);
+                    spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
                     spi_set_slave(spi0, true);
                     // The dma-transfer request signal comes from SPI-TX.
                     channel_config_set_dreq(&cfg, spi_get_dreq(spi0, true));
