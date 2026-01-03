@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.20 Pico2 as DAQ-MCU 2026-01-03"
+#define VERSION_STR "v0.21 Pico2 as DAQ-MCU 2026-01-04"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -259,8 +259,15 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
         case RTDP_ADVERTISE_NEW_DATA:
             { // start new scope
                 RTDP_status = RTDP_BUSY;
+                #define DEBUG_RTDP
+                #ifdef DEBUG_RTDP
+                // Use faked-but-known values.
+                uint16_t values[N_CHAN] = {1, 2, 3, 4, 5, 6, 7, 8};
+                #else
+                // Use the real, sampled data.
                 uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
                 unpack_sample_set(RTDP_data_words, values);
+                #endif
                 for (uint i=0; i < N_CHAN; i++) {
                     // Put the data into the outgoing byte buffer in big-endian layout.
                     byte_buffer[2*i] = (uint8_t) (values[i] & 0xff00) >> 8;
