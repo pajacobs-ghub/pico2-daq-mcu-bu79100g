@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.21 Pico2 as DAQ-MCU 2026-01-04"
+#define VERSION_STR "v0.22 Pico2 as DAQ-MCU 2026-01-04"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -233,14 +233,29 @@ static uint32_t RTDP_data_words[N_CHAN/2];
 
 void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
 {
-    // We will send out the data from this buffer.
-    uint8_t byte_buffer[N_CHAN*2];
+    uint8_t tx_buffer[N_CHAN*2]; // Send out the data from this buffer.
+    // The data sheet seems to indicate that we have to collect
+    // the incoming data, even if we don't want it.
+    uint8_t rx_buffer[N_CHAN*2]; // Dump the unwanted data here.
+    //
+    // Transfer bytes to and from the SPI peripheral via DMA channels.
     const uint dma_spi0_tx = dma_claim_unused_channel(true);
-    dma_channel_config cfg = dma_channel_get_default_config(dma_spi0_tx);
-    channel_config_set_transfer_data_size(&cfg, DMA_SIZE_8); // bytes
+    const uint dma_spi0_rx = dma_claim_unused_channel(true);
+    dma_channel_config tx_cfg = dma_channel_get_default_config(dma_spi0_tx);
+    dma_channel_config rx_cfg = dma_channel_get_default_config(dma_spi0_rx);
+    channel_config_set_transfer_data_size(&tx_cfg, DMA_SIZE_8);
+    channel_config_set_read_increment(&tx_cfg, true);
+    channel_config_set_write_increment(&tx_cfg, false);
+    channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_8);
+    channel_config_set_read_increment(&rx_cfg, false);
+    channel_config_set_write_increment(&rx_cfg, true);
+    // The dma-transfer requests are paced by the SPI peripheral.
+    channel_config_set_dreq(&tx_cfg, spi_get_dreq(spi0, true));
+    channel_config_set_dreq(&rx_cfg, spi_get_dreq(spi0, false));
+    //
     uint timeout_period_us = vregister[4];
-    // The minimum transfer time is about 32us, so it does not make much sense
-    // to have a short timeout.
+    // At 2MHz, 16 bytes transfer in about 64us,
+    // so it does not make much sense to have a very short timeout.
     if (timeout_period_us < 100) timeout_period_us = 100;
     //
     // The main responsibility of core1 is to look for incoming commands and act.
@@ -249,7 +264,7 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
     // and core0 will only put new data in that array while core1 is active and idle.
     //
     RTDP_status = RTDP_IDLE;
-    bool my_spi_is_not_initialized = true;
+    bool my_spi_is_initialized = false;
     bool active = true;
     while (active) {
         // Wait until we are commanded to do something.
@@ -259,8 +274,8 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
         case RTDP_ADVERTISE_NEW_DATA:
             { // start new scope
                 RTDP_status = RTDP_BUSY;
-                #define DEBUG_RTDP
-                #ifdef DEBUG_RTDP
+                #define DEBUG_RTDP 1
+                #if DEBUG_RTDP == 1
                 // Use faked-but-known values.
                 uint16_t values[N_CHAN] = {1, 2, 3, 4, 5, 6, 7, 8};
                 #else
@@ -270,23 +285,30 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 #endif
                 for (uint i=0; i < N_CHAN; i++) {
                     // Put the data into the outgoing byte buffer in big-endian layout.
-                    byte_buffer[2*i] = (uint8_t) (values[i] & 0xff00) >> 8;
-                    byte_buffer[2*i+1] = (uint8_t) (values[i] & 0x00ff);
+                    tx_buffer[2*i] = (uint8_t) (values[i] & 0xff00) >> 8;
+                    tx_buffer[2*i+1] = (uint8_t) (values[i] & 0x00ff);
                 }
-                if (my_spi_is_not_initialized) {
+                if (!my_spi_is_initialized) {
                     // We (conditionally) do the SPI module initialization here
                     // because it may have been deinitialized by a timeout event,
                     // or this may be the first use.
-                    spi_init(spi0, 4000*1000);
-                    spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+                    // My reading of Section 12.3.4.4. Clock ratios in the data sheet
+                    // seems to indicate that we are limited to about 2MHz serial clock
+                    // in slave mode.
+                    // If we don't care about the MOSI data, we might go faster.
+                    spi_init(spi0, 2000*1000);
                     spi_set_slave(spi0, true);
-                    // The dma-transfer request signal comes from SPI-TX.
-                    channel_config_set_dreq(&cfg, spi_get_dreq(spi0, true));
-                    my_spi_is_not_initialized = false;
+                    spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+                    my_spi_is_initialized = true;
                 }
-                dma_channel_configure(dma_spi0_tx, &cfg,
+                dma_channel_configure(dma_spi0_tx, &tx_cfg,
                                       &spi_get_hw(spi0)->dr, // write address
-                                      byte_buffer, // read address
+                                      tx_buffer, // read address
+                                      dma_encode_transfer_count(N_CHAN*2),
+                                      true); // can start now...
+                dma_channel_configure(dma_spi0_rx, &rx_cfg,
+                                      rx_buffer, // write address
+                                      &spi_get_hw(spi0)->dr, // read address
                                       dma_encode_transfer_count(N_CHAN*2),
                                       true); // can start now...
                 // At this point, the data bytes are ready to be sent via SPI0,
@@ -314,11 +336,14 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 while (!gpio_get(SPI0_CSn_PIN)) {
                     if (time_reached(timeout)) { goto timed_out; }
                 }
+                // If we arrive here then the data has been transferred through
+                // the SPI peripheral
                 goto finish;
             timed_out:
                 spi_deinit(spi0);
                 dma_channel_cleanup(dma_spi0_tx);
-                my_spi_is_not_initialized = true;
+                dma_channel_cleanup(dma_spi0_rx);
+                my_spi_is_initialized = false;
             finish:
                 disable_RTDP_transceiver();
                 clear_data_ready();
@@ -328,7 +353,8 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
         case RTDP_STOP:
             spi_deinit(spi0);
             dma_channel_cleanup(dma_spi0_tx);
-            my_spi_is_not_initialized = true;
+            dma_channel_cleanup(dma_spi0_rx);
+            my_spi_is_initialized = false;
             clear_data_ready();
             RTDP_status = RTDP_IDLE;
             active = false;
@@ -338,6 +364,7 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
         }
     } // end while
     dma_channel_unclaim(dma_spi0_tx);
+    dma_channel_unclaim(dma_spi0_rx);
 } // end void core1_service_RTDP()
 
 //
