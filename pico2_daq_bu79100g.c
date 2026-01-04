@@ -17,6 +17,7 @@
 //                Implemented using hints from the C/C++ SDK manual,
 //                the RP2350 datasheet, and code from the examples at
 //                https://github.com/raspberrypi/pico-examples/
+//    2026-01-05: Use CPOL=1 CPHA=1 for RTDP SPI mode
 //
 #include "pico/stdlib.h"
 #include "pico/multicore.h"
@@ -36,7 +37,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.23 Pico2 as DAQ-MCU 2026-01-04"
+#define VERSION_STR "v0.24 Pico2 as DAQ-MCU 2026-01-05"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -271,19 +272,11 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
         case RTDP_ADVERTISE_NEW_DATA:
             { // start new scope
                 RTDP_status = RTDP_BUSY;
-                #define DEBUG_RTDP 1
-                #if DEBUG_RTDP == 1
-                // Use faked-but-known values.
-                uint16_t values[N_CHAN] = {0xff01, 0xff02, 0xff03, 0xff04,
-                                           0xff05, 0xff06, 0xff07, 0xff08};
-                #else
-                // Use the real, sampled data.
                 uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
                 unpack_sample_set(RTDP_data_words, values);
-                #endif
                 for (uint i=0; i < N_CHAN; i++) {
                     // Put the data into the outgoing byte buffer in big-endian layout.
-                    tx_buffer[2*i] = (uint8_t) (values[i] & 0xff00) >> 8;
+                    tx_buffer[2*i] = (uint8_t) (values[i] >> 8);
                     tx_buffer[2*i+1] = (uint8_t) (values[i] & 0x00ff);
                 }
                 if (!my_spi_is_initialized) {
@@ -296,9 +289,11 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                     // If we don't care about the MOSI data, we might go faster.
                     spi_init(spi0, 2000*1000);
                     spi_set_slave(spi0, true);
-                    spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+                    spi_set_format(spi0, 8, SPI_CPOL_1, SPI_CPHA_1, SPI_MSB_FIRST);
                     gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
+                    gpio_pull_up(SPI0_CSn_PIN);
                     gpio_set_function(SPI0_SCK_PIN, GPIO_FUNC_SPI);
+                    gpio_pull_up(SPI0_SCK_PIN);
                     gpio_set_function(SPI0_TX_PIN, GPIO_FUNC_SPI);
                     // The dma-transfer requests are paced by the SPI peripheral.
                     channel_config_set_dreq(&tx_cfg, spi_get_dreq(spi0, true)); // tx
