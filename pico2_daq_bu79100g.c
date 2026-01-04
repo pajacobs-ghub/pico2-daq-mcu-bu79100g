@@ -36,7 +36,7 @@
 #include <ctype.h>
 #include "bu79100g.pio.h"
 
-#define VERSION_STR "v0.22 Pico2 as DAQ-MCU 2026-01-04"
+#define VERSION_STR "v0.23 Pico2 as DAQ-MCU 2026-01-04"
 const uint n_adc_chips = 8;
 
 // Names for the IO pins.
@@ -249,9 +249,6 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
     channel_config_set_transfer_data_size(&rx_cfg, DMA_SIZE_8);
     channel_config_set_read_increment(&rx_cfg, false);
     channel_config_set_write_increment(&rx_cfg, true);
-    // The dma-transfer requests are paced by the SPI peripheral.
-    channel_config_set_dreq(&tx_cfg, spi_get_dreq(spi0, true));
-    channel_config_set_dreq(&rx_cfg, spi_get_dreq(spi0, false));
     //
     uint timeout_period_us = vregister[4];
     // At 2MHz, 16 bytes transfer in about 64us,
@@ -277,7 +274,8 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 #define DEBUG_RTDP 1
                 #if DEBUG_RTDP == 1
                 // Use faked-but-known values.
-                uint16_t values[N_CHAN] = {1, 2, 3, 4, 5, 6, 7, 8};
+                uint16_t values[N_CHAN] = {0xff01, 0xff02, 0xff03, 0xff04,
+                                           0xff05, 0xff06, 0xff07, 0xff08};
                 #else
                 // Use the real, sampled data.
                 uint16_t values[N_CHAN] = {0, 0, 0, 0, 0, 0, 0, 0};
@@ -299,21 +297,28 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                     spi_init(spi0, 2000*1000);
                     spi_set_slave(spi0, true);
                     spi_set_format(spi0, 8, SPI_CPOL_0, SPI_CPHA_0, SPI_MSB_FIRST);
+                    gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
+                    gpio_set_function(SPI0_SCK_PIN, GPIO_FUNC_SPI);
+                    gpio_set_function(SPI0_TX_PIN, GPIO_FUNC_SPI);
+                    // The dma-transfer requests are paced by the SPI peripheral.
+                    channel_config_set_dreq(&tx_cfg, spi_get_dreq(spi0, true)); // tx
+                    channel_config_set_dreq(&rx_cfg, spi_get_dreq(spi0, false)); // rx
                     my_spi_is_initialized = true;
                 }
                 dma_channel_configure(dma_spi0_tx, &tx_cfg,
                                       &spi_get_hw(spi0)->dr, // write address
                                       tx_buffer, // read address
                                       dma_encode_transfer_count(N_CHAN*2),
-                                      true); // can start now...
+                                      false); // start later...
                 dma_channel_configure(dma_spi0_rx, &rx_cfg,
                                       rx_buffer, // write address
                                       &spi_get_hw(spi0)->dr, // read address
                                       dma_encode_transfer_count(N_CHAN*2),
-                                      true); // can start now...
+                                      false); // start later...
                 // At this point, the data bytes are ready to be sent via SPI0,
                 // so we can signal to the external supervisor device that there
                 // is data to collect.
+                dma_start_channel_mask((1u << dma_spi0_tx) | (1u << dma_spi0_rx));
                 assert_data_ready();
                 // It is up to the external device to collect all of the data
                 // by selecting the Pico2 as a slave SPI device and clocking out
@@ -329,7 +334,8 @@ void __no_inline_not_in_flash_func(core1_service_RTDP)(void)
                 }
                 enable_RTDP_transceiver();
                 // Wait for the data to be clocked out.
-                while (dma_channel_is_busy(dma_spi0_tx)) {
+                while (dma_channel_is_busy(dma_spi0_tx) ||
+                       dma_channel_is_busy(dma_spi0_rx)) {
                     if (time_reached(timeout)) { goto timed_out; }
                 }
                 // Wait for deselection by the SPI-master device.
@@ -949,12 +955,8 @@ int main()
     gpio_set_dir(DATA_RDY_PIN, GPIO_OUT);
     gpio_disable_pulls(DATA_RDY_PIN);
     clear_data_ready();
-    // Third, the SPI module as a slave, for transmit only.
-    // We assign the IO pin functions here but delay the module
-    // initialization until we actually want to use it.
-    gpio_set_function(SPI0_CSn_PIN, GPIO_FUNC_SPI);
-    gpio_set_function(SPI0_SCK_PIN, GPIO_FUNC_SPI);
-    gpio_set_function(SPI0_TX_PIN, GPIO_FUNC_SPI);
+    // Third, use the SPI0 module as a slave, for transmit only,
+    // but defer its initialization until we need it.
     //
 	// Signal to the COMMS MCU that we are ready.
 	//
