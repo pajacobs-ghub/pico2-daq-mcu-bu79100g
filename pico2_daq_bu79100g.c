@@ -171,7 +171,7 @@ void set_registers_to_original_values()
     // For values between 1 and 20, the timer is user to pace conversions.
     // For a value of 1, the processor tuns flat out and the PIO regulates
     // the pace of conversion.
-    vregister[1] = N_CHAN;          // number of channels to sample ia always 8.
+    vregister[1] = N_CHAN;          // number of channels to sample; is always 8.
     vregister[2] = MAX_N_SAMPLES/2; // number of samples in record after trigger event
     vregister[3] = 0;               // trigger mode 0=immediate, 1=wait for EVENTn
     vregister[4] = 0;               // advertising period (in microseconds) for the RTDP
