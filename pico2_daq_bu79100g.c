@@ -859,8 +859,8 @@ void interpret_command(char* cmdStr)
         break;
     case 'z':
         // Release the EVENT# line.
-        // Presumably this line has been help low following
-        // a trigger event during the sampling process.
+        // Presumably this line has been kept low,
+        // following a trigger event during the sampling process.
         release_eventn_line();
         printf("event line released ok\n");
         break;
