@@ -168,14 +168,16 @@ int vregister[NUMREG]; // working copy in SRAM
 void set_registers_to_original_values()
 {
     vregister[0] = 10;              // sample period in microseconds (timer ticks)
-    // For values between 1 and 20, the timer is user to pace conversions.
-    // For a value of 1, the processor tuns flat out and the PIO regulates
+    // For values in the range 2 to 20, the timer is user to pace conversions.
+    // For a value of 1, the processor runs flat out and the PIO regulates
     // the pace of conversion.
     vregister[1] = N_CHAN;          // number of channels to sample; is always 8.
     vregister[2] = MAX_N_SAMPLES/2; // number of samples in record after trigger event
     vregister[3] = 0;               // trigger mode 0=immediate, 1=wait for EVENTn
     vregister[4] = 0;               // advertising period (in microseconds) for the RTDP
     // A value of zero will disable the RTDP.
+    // Note that the RTDP will only be available for sample periods 2 microseconds
+    // and greater.
 }
 
 static inline uint32_t oldest_fullword_index_in_data()
